@@ -1,0 +1,16 @@
+[Unit]
+Description=Mount Proton Drive via rclone FUSE
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart={{SCRIPT_DIR}}/mount.sh --foreground
+ExecStop=/bin/bash -c "fusermount -u $HOME/ProtonDrive 2>/dev/null || fusermount3 -u $HOME/ProtonDrive 2>/dev/null || true"
+Restart=on-failure
+RestartSec=10
+Environment=HOME=%h
+EnvironmentFile=%h/.config/protondrive-linux/config.env
+
+[Install]
+WantedBy=default.target

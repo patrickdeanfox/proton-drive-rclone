@@ -1,0 +1,16 @@
+[Unit]
+Description=Bisync Proton Drive via rclone
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{SCRIPT_DIR}}/sync.sh
+Environment=HOME=%h
+EnvironmentFile=%h/.config/protondrive-linux/config.env
+TimeoutStartSec=600
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=default.target

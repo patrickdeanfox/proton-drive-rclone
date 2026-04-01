@@ -1,0 +1,90 @@
+#compdef pdrive
+# Zsh completion for pdrive
+# Copy to a directory in your $fpath, e.g.:
+#   cp _pdrive ~/.zsh/completions/
+#   fpath=(~/.zsh/completions $fpath)
+
+_pdrive() {
+    local -a commands
+    commands=(
+        'mount:Mount Proton Drive as local FUSE filesystem'
+        'unmount:Unmount cleanly'
+        'sync:Run bisync (two-way sync)'
+        'status:Show mount status, sync state, quota'
+        'duplicates:Find and handle duplicate files'
+        'organize:Sort files into folders by type/date'
+        'rename:Bulk rename files with patterns'
+        'backup:Create/restore/list snapshots'
+        'cleanup:Clean caches, old logs, trash'
+        'watch:Watch for file changes and auto-sync'
+        'logs:Tail the sync log'
+        'health:Run full health check'
+        'config:Show or edit configuration'
+        'help:Show help'
+        'version:Show version'
+    )
+
+    _arguments -C \
+        '1:command:->cmd' \
+        '*::arg:->args'
+
+    case "$state" in
+        cmd)
+            _describe 'command' commands
+            ;;
+        args)
+            case "${words[1]}" in
+                sync)
+                    _arguments \
+                        '--dry-run[Preview changes]' \
+                        '--force[Force sync ignoring safety limits]' \
+                        '--one-way[One-way sync local to remote]' \
+                        '--resync[Force full resync]'
+                    ;;
+                duplicates|dedup)
+                    _arguments \
+                        '--action[Action for duplicates]:action:(report move delete)' \
+                        '--scope[Where to scan]:scope:(local remote)' \
+                        '--name-only[Match by filename not hash]' \
+                        '--path[Target directory]:dir:_directories'
+                    ;;
+                organize|org)
+                    _arguments \
+                        '--dry-run[Preview without moving]' \
+                        '--no-dry-run[Apply changes]' \
+                        '--rules[Custom rules file]:file:_files' \
+                        '--path[Target directory]:dir:_directories'
+                    ;;
+                rename)
+                    _arguments \
+                        '--pattern[Rename pattern]:pattern:(slugify date-prefix strip-copy lowercase strip-spaces sequential)' \
+                        '--path[Target directory]:dir:_directories' \
+                        '--dry-run[Preview without renaming]' \
+                        '--recursive[Process subdirectories]'
+                    ;;
+                backup)
+                    _arguments \
+                        '(-l --list)'{-l,--list}'[List snapshots]' \
+                        '(-r --restore)'{-r,--restore}'[Restore snapshot]:snapshot:' \
+                        '--prune[Delete old snapshots]' \
+                        '--keep[Keep N snapshots]:count:' \
+                        '--dir[Backup directory]:dir:_directories'
+                    ;;
+                cleanup)
+                    _arguments \
+                        '--dry-run[Preview without deleting]' \
+                        '--all[Clear all cache]'
+                    ;;
+                mount)
+                    _arguments \
+                        '(-f --foreground)'{-f,--foreground}'[Run in foreground]'
+                    ;;
+                config|cfg)
+                    _arguments '1:action:(edit path)'
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_pdrive "$@"

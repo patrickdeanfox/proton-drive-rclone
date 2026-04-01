@@ -1,0 +1,15 @@
+[Unit]
+Description=Watch Proton Drive sync folder and auto-sync on changes
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={{SCRIPT_DIR}}/watch.sh
+Restart=on-failure
+RestartSec=5
+Environment=HOME=%h
+EnvironmentFile=%h/.config/protondrive-linux/config.env
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Proton Drive bisync on schedule
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=protondrive-sync.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

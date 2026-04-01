@@ -1,0 +1,12 @@
+[Unit]
+Description=Organize Proton Drive files by type/date
+After=protondrive-sync.service
+
+[Service]
+Type=oneshot
+ExecStart={{SCRIPT_DIR}}/organize.sh
+Environment=HOME=%h
+EnvironmentFile=%h/.config/protondrive-linux/config.env
+
+[Install]
+WantedBy=default.target

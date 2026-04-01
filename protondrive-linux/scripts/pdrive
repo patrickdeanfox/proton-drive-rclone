@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# pdrive — CLI wrapper for protondrive-linux
+# Usage: pdrive <command> [options]
+
+set -euo pipefail
+
+VERSION="0.1.0"
+CONFIG_DIR="$HOME/.config/protondrive-linux"
+CONFIG_FILE="$CONFIG_DIR/config.env"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+
+# If installed to ~/.local/bin, scripts live alongside the project
+# Try to find the scripts directory
+if [[ -f "$SCRIPT_DIR/mount.sh" ]]; then
+    SCRIPTS="$SCRIPT_DIR"
+elif [[ -f "$SCRIPT_DIR/../scripts/mount.sh" ]]; then
+    SCRIPTS="$SCRIPT_DIR/../scripts"
+else
+    # Fallback: look relative to config
+    SCRIPTS="$(grep -m1 'SCRIPT_DIR=' "$CONFIG_FILE" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "$SCRIPT_DIR")"
+fi
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+# ─── Load config ──────────────────────────────────────────────────────
+
+load_config() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo -e "${RED}Config not found:${NC} $CONFIG_FILE"
+        echo "Run install.sh first."
+        exit 1
+    fi
+    set -a
+    # shellcheck source=/dev/null
+    source "$CONFIG_FILE"
+    set +a
+}
+
+# ─── Commands ─────────────────────────────────────────────────────────
+
+cmd_mount() {
+    load_config
+    bash "$SCRIPTS/mount.sh" "$@"
+}
+
+cmd_unmount() {
+    load_config
+    bash "$SCRIPTS/unmount.sh" "$@"
+}
+
+cmd_sync() {
+    load_config
+    bash "$SCRIPTS/sync.sh" "$@"
+}
+
+cmd_status() {
+    load_config
+    bash "$SCRIPTS/status.sh" "$@"
+}
+
+cmd_duplicates() {
+    load_config
+    bash "$SCRIPTS/duplicates.sh" "$@"
+}
+
+cmd_organize() {
+    load_config
+    bash "$SCRIPTS/organize.sh" "$@"
+}
+
+cmd_rename() {
+    load_config
+    bash "$SCRIPTS/rename.sh" "$@"
+}
+
+cmd_logs() {
+    load_config
+    local log_file="$LOG_DIR/sync.log"
+    if [[ -f "$log_file" ]]; then
+        tail -f "$log_file"
+    else
+        echo "No log file yet: $log_file"
+    fi
+}
+
+cmd_health() {
+    load_config
+    bash "$SCRIPTS/health.sh" "$@"
+}
+
+cmd_config() {
+    load_config
+    if [[ "${1:-}" == "edit" ]]; then
+        "${EDITOR:-nano}" "$CONFIG_FILE"
+    elif [[ "${1:-}" == "path" ]]; then
+        echo "$CONFIG_FILE"
+    else
+        echo -e "${BOLD}Config:${NC} $CONFIG_FILE"
+        echo ""
+        cat "$CONFIG_FILE"
+    fi
+}
+
+# ─── Help ─────────────────────────────────────────────────────────────
+
+cmd_help() {
+    cat << EOF
+
+$(echo -e "${BOLD}pdrive${NC} v$VERSION — Proton Drive manager for Linux")
+
+$(echo -e "${BOLD}USAGE${NC}")
+    pdrive <command> [options]
+
+$(echo -e "${BOLD}COMMANDS${NC}")
+    $(echo -e "${GREEN}mount${NC}")          Mount Proton Drive as a local FUSE filesystem
+    $(echo -e "${GREEN}unmount${NC}")        Unmount cleanly
+    $(echo -e "${GREEN}sync${NC}")           Run a bisync (two-way sync)
+        --dry-run        Preview changes without applying
+        --force          Force sync even with many deletions
+        --one-way        One-way sync (local → remote)
+    $(echo -e "${GREEN}status${NC}")         Show mount status, sync state, and quota
+    $(echo -e "${GREEN}duplicates${NC}")     Find duplicate files
+        --action report|move|delete
+        --scope local|remote
+        --name-only      Match by name instead of hash
+    $(echo -e "${GREEN}organize${NC}")       Sort files into folders by type/date
+        --dry-run        Preview without moving
+        --rules FILE     Custom rules file
+    $(echo -e "${GREEN}rename${NC}")         Bulk rename files
+        --pattern slugify|date-prefix|strip-copy|lowercase
+        --path DIR       Target directory
+        --dry-run        Preview
+    $(echo -e "${GREEN}backup${NC}")         Create, list, or restore snapshots
+        --list           List all snapshots
+        --restore ID     Restore a snapshot (or "latest")
+        --prune          Remove old snapshots
+    $(echo -e "${GREEN}watch${NC}")          Watch for file changes and auto-sync
+    $(echo -e "${GREEN}cleanup${NC}")        Clean caches, old logs, and trash
+        --dry-run        Preview without deleting
+        --all            Also clear all rclone cache
+    $(echo -e "${GREEN}logs${NC}")           Tail the sync log
+    $(echo -e "${GREEN}health${NC}")         Run a full health check
+    $(echo -e "${GREEN}config${NC}")         Show current config
+        edit             Open config in editor
+        path             Print config file path
+
+$(echo -e "${BOLD}EXAMPLES${NC}")
+    pdrive mount
+    pdrive sync --dry-run
+    pdrive duplicates --action move
+    pdrive organize --dry-run
+    pdrive rename --pattern date-prefix --path Documents/
+    pdrive backup --list
+    pdrive backup --restore latest
+    pdrive watch
+    pdrive cleanup --dry-run
+
+EOF
+}
+
+# ─── Dispatch ─────────────────────────────────────────────────────────
+
+main() {
+    local cmd="${1:-help}"
+    shift || true
+
+    case "$cmd" in
+        mount)       cmd_mount "$@" ;;
+        unmount|umount) cmd_unmount "$@" ;;
+        sync)        cmd_sync "$@" ;;
+        status)      cmd_status "$@" ;;
+        duplicates|dedup) cmd_duplicates "$@" ;;
+        organize|org) cmd_organize "$@" ;;
+        rename)      cmd_rename "$@" ;;
+        backup)      load_config; bash "$SCRIPTS/backup.sh" "$@" ;;
+        watch)       load_config; bash "$SCRIPTS/watch.sh" "$@" ;;
+        cleanup)     load_config; bash "$SCRIPTS/cleanup.sh" "$@" ;;
+        logs|log)    cmd_logs "$@" ;;
+        health)      cmd_health "$@" ;;
+        config|cfg)  cmd_config "$@" ;;
+        help|--help|-h) cmd_help ;;
+        version|--version|-v) echo "pdrive v$VERSION" ;;
+        *)
+            echo -e "${RED}Unknown command:${NC} $cmd"
+            echo "Run 'pdrive help' for usage."
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

@@ -1,0 +1,62 @@
+# File organization rules for pdrive organize
+# Files are matched top-to-bottom; first match wins unless fallback: true
+#
+# Supported placeholders in destination:
+#   {year}   - file modification year (e.g. 2026)
+#   {month}  - file modification month (e.g. 04)
+#
+# Match uses glob patterns. Brace expansion works: *.{jpg,png}
+
+rules:
+  - name: screenshots
+    match: "Screenshot*.{png,jpg}"
+    destination: "Media/Screenshots"
+
+  - name: photos
+    match: "IMG_*.{jpg,jpeg,heic}"
+    destination: "Media/Photos/{year}/{month}"
+
+  - name: images
+    match: "*.{jpg,jpeg,png,gif,webp,svg,heic,heif,bmp,tiff,raw,cr2,nef}"
+    destination: "Media/Images"
+
+  - name: documents
+    match: "*.{pdf,docx,doc,xlsx,xls,pptx,ppt,odt,ods,odp,txt,md,rtf,csv}"
+    destination: "Documents"
+
+  - name: ebooks
+    match: "*.{epub,mobi,azw3}"
+    destination: "Books"
+
+  - name: videos
+    match: "*.{mp4,mkv,avi,mov,webm,flv,wmv,m4v}"
+    destination: "Media/Videos"
+
+  - name: audio
+    match: "*.{mp3,flac,ogg,wav,aac,m4a,opus,wma}"
+    destination: "Media/Audio"
+
+  - name: archives
+    match: "*.{zip,tar,gz,bz2,xz,7z,rar,tar.gz,tar.bz2,tar.xz,tgz}"
+    destination: "Archives"
+
+  - name: code
+    match: "*.{py,js,ts,jsx,tsx,rs,go,java,c,cpp,h,hpp,sh,bash,rb,php,sql}"
+    destination: "Code"
+
+  - name: config-files
+    match: "*.{json,yml,yaml,toml,ini,conf,cfg,env}"
+    destination: "Config"
+
+  - name: fonts
+    match: "*.{ttf,otf,woff,woff2}"
+    destination: "Fonts"
+
+  - name: installers
+    match: "*.{deb,rpm,AppImage,flatpakref,snap}"
+    destination: "Installers"
+
+  - name: by-date
+    match: "*"
+    destination: "Unsorted/{year}/{month}"
+    fallback: true
