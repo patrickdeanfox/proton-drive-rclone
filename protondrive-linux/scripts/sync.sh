@@ -90,7 +90,6 @@ main() {
 
     # Build flags
     local -a flags=()
-    flags+=(--verbose)
     flags+=(--log-file "$LOG_FILE")
     flags+=(--log-level "${LOG_LEVEL:-INFO}")
     flags+=(--checkers "${SYNC_CHECKERS:-8}")
