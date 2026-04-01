@@ -111,7 +111,7 @@ main() {
         # One-way: local → remote
         log "Running: rclone sync $SYNC_DIR → $RCLONE_REMOTE:"
         if ! $FORCE; then
-            flags+=(--max-delete "${SYNC_MAX_DELETE_PCT:-50}%")
+            flags+=(--max-delete "${SYNC_MAX_DELETE_PCT:-50}")
         fi
         rclone sync "$SYNC_DIR" "$RCLONE_REMOTE:" "${flags[@]}" 2>&1 | tee -a "$LOG_FILE" || rc=$?
     else
@@ -126,7 +126,7 @@ main() {
         esac
 
         if ! $FORCE; then
-            flags+=(--max-delete "${SYNC_MAX_DELETE_PCT:-50}%")
+            flags+=(--max-delete "${SYNC_MAX_DELETE_PCT:-50}")
         fi
 
         log "Running: rclone bisync $SYNC_DIR ↔ $RCLONE_REMOTE:"
