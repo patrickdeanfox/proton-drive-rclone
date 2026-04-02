@@ -828,8 +828,13 @@ def api_health_check():
 load_and_restore_schedules()
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 5000)))
+    parser.add_argument("--host", default="0.0.0.0")
+    args = parser.parse_args()
     print("=" * 60)
     print("  Proton Drive rclone Web Interface")
-    print("  http://localhost:5000")
+    print(f"  http://localhost:{args.port}")
     print("=" * 60)
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host=args.host, port=args.port, debug=False)
