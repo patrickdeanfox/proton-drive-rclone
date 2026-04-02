@@ -1,0 +1,22 @@
+[Unit]
+Description=Proton Drive rclone Web Interface
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=%I
+Group=%I
+WorkingDirectory=/home/%I/proton-drive-rclone/webapp
+Environment=PATH=/home/%I/proton-drive-rclone/webapp/venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/%I/proton-drive-rclone/webapp/venv/bin/python app.py
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=protondrive-webapp
+
+[Install]
+WantedBy=multi-user.target

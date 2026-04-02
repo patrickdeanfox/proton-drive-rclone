@@ -1,0 +1,248 @@
+{% extends 'base.html' %}
+{% set active = 'connection' %}
+{% block title %}Connection — Proton Drive Manager{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h2>Connection &amp; Credentials</h2>
+    <p>Manage your rclone remotes and monitor Proton Drive connectivity.</p>
+</div>
+
+<!-- Active Remote -->
+<div class="card" id="active-remote-card">
+    <div class="card-header">
+        <h3>🔌 Active Remote</h3>
+        <button class="btn btn-ghost" onclick="loadConnection()">🔄 Refresh</button>
+    </div>
+    <div id="active-remote-info">
+        <div class="loading-overlay"><span class="spinner"></span> Loading...</div>
+    </div>
+</div>
+
+<!-- Quota / Storage -->
+<div class="card" id="quota-card">
+    <div class="card-header">
+        <h3>💾 Storage Quota</h3>
+        <button class="btn btn-ghost btn-sm" onclick="loadQuota()">Check Usage</button>
+    </div>
+    <div id="quota-info">
+        <p class="text-muted">Click "Check Usage" to query Proton Drive storage.</p>
+    </div>
+</div>
+
+<!-- All Remotes -->
+<div class="card">
+    <div class="card-header">
+        <h3>📡 All Configured Remotes</h3>
+    </div>
+    <div id="remotes-list">
+        <div class="loading-overlay"><span class="spinner"></span> Loading...</div>
+    </div>
+</div>
+
+<!-- Config Details -->
+<div class="card" id="config-details-card" style="display:none">
+    <div class="card-header">
+        <h3 id="config-details-title">🔧 Remote Config</h3>
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('config-details-card').style.display='none'">Close</button>
+    </div>
+    <div id="config-details-content"></div>
+</div>
+
+<!-- Reconfigure Instructions -->
+<div class="card">
+    <div class="card-header">
+        <h3>🔑 Update Credentials</h3>
+    </div>
+    <p style="color: var(--text-secondary); margin-bottom: 16px;">
+        rclone credentials for Proton Drive (username, password, 2FA) are stored
+        encrypted in <code style="font-family: var(--font-mono); color: var(--accent);">~/.config/rclone/rclone.conf</code>.
+        To update them, run the following in a terminal:
+    </p>
+    <div class="code-block">
+        <pre id="reconfigure-cmd">rclone config reconnect protondrive:</pre>
+    </div>
+    <p style="color: var(--text-muted); margin-top: 12px; font-size: 13px;">
+        This will prompt for your Proton credentials interactively and update the stored config.
+        To add a new remote entirely, run <code style="font-family: var(--font-mono);">rclone config</code>.
+    </p>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadConnection() {
+    const activeEl = document.getElementById('active-remote-info');
+    const listEl = document.getElementById('remotes-list');
+    activeEl.innerHTML = '<div class="loading-overlay"><span class="spinner"></span></div>';
+    listEl.innerHTML = '<div class="loading-overlay"><span class="spinner"></span></div>';
+
+    const data = await api('/remotes');
+
+    if (data.error) {
+        activeEl.innerHTML = `<div class="alert alert-danger">${data.error}</div>`;
+        listEl.innerHTML = '';
+        return;
+    }
+
+    // Active remote info
+    const active = data.remotes.find(r => r.name === data.active) || null;
+    if (active) {
+        activeEl.innerHTML = `
+            <div class="remote-detail-row">
+                <div class="remote-detail">
+                    <span class="detail-label">Remote name</span>
+                    <span class="detail-value mono">${active.name}</span>
+                </div>
+                <div class="remote-detail">
+                    <span class="detail-label">Type</span>
+                    <span class="detail-value">${active.type}</span>
+                </div>
+                ${active.username ? `<div class="remote-detail">
+                    <span class="detail-label">Account</span>
+                    <span class="detail-value">${active.username}</span>
+                </div>` : ''}
+            </div>
+            <div class="btn-group" style="margin-top:16px">
+                <button class="btn btn-primary btn-sm" onclick="testRemote('${active.name}')">🔗 Test Connection</button>
+                <button class="btn btn-ghost btn-sm" onclick="showConfig('${active.name}')">🔧 View Config</button>
+            </div>
+            <div id="test-result-${active.name}" style="margin-top:12px"></div>
+        `;
+        // Update reconfigure command to use the actual remote name
+        document.getElementById('reconfigure-cmd').textContent = `rclone config reconnect ${active.name}:`;
+    } else {
+        activeEl.innerHTML = `<div class="alert alert-warning">No active remote configured. Select one below or run <code>rclone config</code> in a terminal.</div>`;
+    }
+
+    // Remotes list
+    if (!data.remotes.length) {
+        listEl.innerHTML = '<p class="text-muted">No rclone remotes configured yet. Run <code>rclone config</code> in a terminal to add one.</p>';
+        return;
+    }
+
+    listEl.innerHTML = `
+        <table class="data-table">
+            <thead><tr>
+                <th>Name</th><th>Type</th><th>Account</th><th>Status</th><th>Actions</th>
+            </tr></thead>
+            <tbody>
+                ${data.remotes.map(r => `
+                <tr>
+                    <td><span class="mono">${r.name}</span></td>
+                    <td>${r.type}</td>
+                    <td>${r.username || '<span class="text-muted">—</span>'}</td>
+                    <td>
+                        ${r.is_active
+                            ? '<span class="badge badge-success">Active</span>'
+                            : `<button class="btn btn-ghost btn-xs" onclick="setActive('${r.name}')">Set Active</button>`}
+                    </td>
+                    <td>
+                        <button class="btn btn-ghost btn-xs" onclick="testRemote('${r.name}')">Test</button>
+                        <button class="btn btn-ghost btn-xs" onclick="showConfig('${r.name}')">Config</button>
+                    </td>
+                </tr>
+                `).join('')}
+            </tbody>
+        </table>
+    `;
+}
+
+async function testRemote(name) {
+    const resultEl = document.getElementById(`test-result-${name}`) ||
+                     createTestResultEl(name);
+    resultEl.innerHTML = '<span class="spinner" style="display:inline-block;width:14px;height:14px;border-width:2px"></span> Testing...';
+    const data = await api(`/remotes/${encodeURIComponent(name)}/test`, { method: 'POST' });
+    if (data.success) {
+        resultEl.innerHTML = '<span class="badge badge-success">Connected successfully</span>';
+        showToast(`${name}: connected`, 'success');
+    } else {
+        resultEl.innerHTML = `<span class="badge badge-danger">Failed: ${data.error}</span>`;
+        showToast(`${name}: connection failed`, 'error');
+    }
+}
+
+function createTestResultEl(name) {
+    const el = document.createElement('div');
+    el.id = `test-result-${name}`;
+    el.style.marginTop = '8px';
+    document.getElementById('active-remote-info').appendChild(el);
+    return el;
+}
+
+async function setActive(name) {
+    const data = await api(`/remotes/${encodeURIComponent(name)}/set-active`, { method: 'POST' });
+    if (data.success) {
+        showToast(`Active remote set to "${name}"`, 'success');
+        loadConnection();
+    } else {
+        showToast(data.error || 'Failed to update', 'error');
+    }
+}
+
+async function showConfig(name) {
+    const card = document.getElementById('config-details-card');
+    const title = document.getElementById('config-details-title');
+    const content = document.getElementById('config-details-content');
+    card.style.display = 'block';
+    title.textContent = `🔧 Config: ${name}`;
+    content.innerHTML = '<div class="loading-overlay" style="position:relative;height:60px"><span class="spinner"></span></div>';
+    card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    const data = await api(`/remotes/${encodeURIComponent(name)}/config`);
+    if (data.error) {
+        content.innerHTML = `<div class="alert alert-danger">${data.error}</div>`;
+        return;
+    }
+    const rows = Object.entries(data.fields).map(([k, v]) =>
+        `<tr><td class="mono" style="color:var(--text-secondary);padding:6px 12px">${k}</td>
+             <td class="mono" style="padding:6px 12px">${v}</td></tr>`
+    ).join('');
+    content.innerHTML = `<table style="width:100%;border-collapse:collapse">${rows}</table>`;
+}
+
+async function loadQuota() {
+    const el = document.getElementById('quota-info');
+    el.innerHTML = '<div class="loading-overlay" style="position:relative;height:60px"><span class="spinner"></span></div>';
+
+    // Get active remote name
+    const remoteData = await api('/remotes');
+    const active = remoteData.active;
+    if (!active) {
+        el.innerHTML = '<p class="text-muted">No active remote set.</p>';
+        return;
+    }
+
+    const data = await api(`/remotes/${encodeURIComponent(active)}/about`);
+    if (!data.success) {
+        el.innerHTML = `<div class="alert alert-warning">${data.error}</div>`;
+        return;
+    }
+
+    const d = data.data;
+    const used = d.used || 0;
+    const total = d.total || 0;
+    const free = d.free || (total - used);
+    const pct = total > 0 ? Math.round((used / total) * 100) : 0;
+
+    el.innerHTML = `
+        <div class="quota-grid">
+            <div class="quota-stat"><span class="quota-label">Used</span><span class="quota-value">${formatSize(used)}</span></div>
+            <div class="quota-stat"><span class="quota-label">Free</span><span class="quota-value">${formatSize(free)}</span></div>
+            <div class="quota-stat"><span class="quota-label">Total</span><span class="quota-value">${formatSize(total)}</span></div>
+        </div>
+        ${total > 0 ? `
+        <div class="quota-bar-wrap" style="margin-top:16px">
+            <div class="quota-bar">
+                <div class="quota-bar-fill" style="width:${pct}%;background:${pct > 85 ? 'var(--danger)' : pct > 60 ? 'var(--warning)' : 'var(--success)'}"></div>
+            </div>
+            <span style="font-size:13px;color:var(--text-secondary)">${pct}% used</span>
+        </div>` : ''}
+        ${d.trashed ? `<p style="margin-top:12px;font-size:13px;color:var(--text-muted)">Trash: ${formatSize(d.trashed)}</p>` : ''}
+    `;
+}
+
+document.addEventListener('DOMContentLoaded', loadConnection);
+</script>
+{% endblock %}

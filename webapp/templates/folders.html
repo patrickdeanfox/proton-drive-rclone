@@ -1,0 +1,67 @@
+{% extends 'base.html' %}
+{% set active = 'folders' %}
+{% block title %}Sync Folders — Proton Drive Manager{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h2>Sync Folders</h2>
+    <p>Configure which folders to sync between your local machine and Proton Drive.</p>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h3>📂 Sync Configurations</h3>
+        <button class="btn btn-primary" onclick="openNewConfig()">+ New Config</button>
+    </div>
+    <div id="sync-configs-list">
+        <div class="loading-overlay"><span class="spinner"></span> Loading...</div>
+    </div>
+</div>
+
+<!-- Config Modal -->
+<div id="config-modal" class="modal-overlay">
+    <div class="modal">
+        <h3 id="config-modal-title">📂 New Sync Configuration</h3>
+
+        <div class="form-group">
+            <label>Configuration Name</label>
+            <input type="text" id="config-name" placeholder="e.g. Documents Sync">
+        </div>
+
+        <div class="form-group">
+            <label>Local Path</label>
+            <input type="text" id="config-local-path" placeholder="/home/user/Documents">
+            <div class="form-hint">Browse and select a local folder below:</div>
+            <div id="local-folder-tree" class="folder-tree" style="margin-top: 8px;"></div>
+        </div>
+
+        <div class="form-group">
+            <label>Remote Path (on Proton Drive)</label>
+            <input type="text" id="config-remote-path" placeholder="Leave empty for root, or e.g. Documents">
+            <div class="form-hint">Browse and select a remote folder below:</div>
+            <div id="remote-folder-tree" class="folder-tree" style="margin-top: 8px;"></div>
+        </div>
+
+        <div class="form-row">
+            <div class="form-group">
+                <label>Sync Direction</label>
+                <select id="config-direction">
+                    <option value="bisync">⇄ Bisync (Two-way)</option>
+                    <option value="push">→ Push (Local → Remote)</option>
+                    <option value="pull">← Pull (Remote → Local)</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Exclude Patterns</label>
+                <input type="text" id="config-excludes" placeholder="*.tmp, .DS_Store">
+                <div class="form-hint">Comma-separated glob patterns</div>
+            </div>
+        </div>
+
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeModal('config-modal')">Cancel</button>
+            <button class="btn btn-primary" onclick="saveConfig()">💾 Save Configuration</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
