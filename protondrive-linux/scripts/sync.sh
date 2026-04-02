@@ -119,9 +119,9 @@ main() {
 
         # Conflict resolution
         case "${SYNC_CONFLICT_POLICY:-newer}" in
-            newer)  flags+=(--conflict-resolve "newer") ;;
-            larger) flags+=(--conflict-resolve "larger") ;;
-            skip)   flags+=(--conflict-resolve "none") ;;
+            newer)  flags+=(--conflict-resolve newer) ;;
+            larger) flags+=(--conflict-resolve larger) ;;
+            skip)   ;; # omit flag: rclone creates conflict copies by default
         esac
 
         if ! $FORCE; then
@@ -130,9 +130,17 @@ main() {
 
         log "Running: rclone bisync $SYNC_DIR ↔ $RCLONE_REMOTE:"
 
-        # bisync needs --resync on first run; detect if this is first time
-        local bisync_state="$HOME/.cache/rclone/bisync"
-        if [[ ! -d "$bisync_state" ]] && ! $RESYNC; then
+        # bisync needs --resync on first run; detect via state files for this
+        # specific path pair (not just whether the cache dir exists at all)
+        local bisync_state_dir="$HOME/.cache/rclone/bisync"
+        if ! $RESYNC && [[ -d "$bisync_state_dir" ]]; then
+            # State files are named with a hash that encodes both paths; check
+            # whether any listing file references the current remote
+            if ! ls "$bisync_state_dir"/*.lst 2>/dev/null | xargs grep -ql "$RCLONE_REMOTE" 2>/dev/null; then
+                log "No bisync state found for $RCLONE_REMOTE — adding --resync"
+                flags+=(--resync)
+            fi
+        elif ! $RESYNC && [[ ! -d "$bisync_state_dir" ]]; then
             log "First bisync run detected — adding --resync"
             flags+=(--resync)
         fi
@@ -141,7 +149,7 @@ main() {
 
         # If bisync fails with "must resync", auto-resync once
         if [[ $rc -ne 0 ]] && ! $RESYNC; then
-            if grep -q "must.*resync\|run.*--resync" "$LOG_FILE" 2>/dev/null; then
+            if grep -qi "Bisync requires\|requires.*--resync\|must.*resync" "$LOG_FILE" 2>/dev/null; then
                 log "Bisync requires resync — retrying with --resync"
                 flags+=(--resync)
                 rclone bisync "$SYNC_DIR" "$RCLONE_REMOTE:" "${flags[@]}" 2>&1 | tee -a "$LOG_FILE" || rc=$?
