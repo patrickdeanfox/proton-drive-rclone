@@ -20,7 +20,16 @@ NC='\033[0m'
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --pattern)   PATTERN="$2"; shift ;;
-        --path)      TARGET_DIR="$SYNC_DIR/$2"; shift ;;
+        --path)
+            # Sanitize: resolve and ensure it stays under SYNC_DIR
+            local subpath
+            subpath="$(realpath -m "$SYNC_DIR/$2")"
+            if [[ "$subpath" != "$SYNC_DIR"* ]]; then
+                echo "Error: path must be within $SYNC_DIR" >&2
+                exit 1
+            fi
+            TARGET_DIR="$subpath"
+            shift ;;
         --dry-run)   DRY_RUN=true ;;
         --recursive) RECURSIVE=true ;;
         --help|-h)

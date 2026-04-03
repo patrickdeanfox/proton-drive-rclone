@@ -128,15 +128,17 @@ async function loadConfigs() {
             </tr></thead>
             <tbody>
                 ${configs.map(c => `
-                <tr id="cfg-row-${c.id}">
-                    <td><strong>${c.name}</strong></td>
-                    <td class="mono" style="font-size:12px">${c.local_path || '—'}</td>
-                    <td class="mono" style="font-size:12px">${c.remote_path || '(root)'}</td>
-                    <td>${DIRECTION_LABELS[c.direction] || c.direction}</td>
+                <tr id="cfg-row-${escHtml(c.id)}">
+                    <td><strong>${escHtml(c.name)}</strong></td>
+                    <td class="mono" style="font-size:12px">${escHtml(c.local_path || '—')}</td>
+                    <td class="mono" style="font-size:12px">${escHtml(c.remote_path || '(root)')}</td>
+                    <td>${DIRECTION_LABELS[c.direction] || escHtml(c.direction)}</td>
                     <td>
-                        <button class="btn btn-primary btn-xs" id="run-btn-${c.id}"
-                                onclick="runSync('${c.id}', '${c.name.replace(/'/g,"\\'")}')">▶ Sync</button>
-                        <button class="btn btn-ghost btn-xs" onclick="deleteConfig('${c.id}')">🗑</button>
+                        <button class="btn btn-primary btn-xs" id="run-btn-${escHtml(c.id)}"
+                                data-config-id="${escHtml(c.id)}" data-config-name="${escHtml(c.name)}"
+                                onclick="runSync(this.dataset.configId, this.dataset.configName)">▶ Sync</button>
+                        <button class="btn btn-ghost btn-xs" data-config-id="${escHtml(c.id)}"
+                                onclick="deleteConfig(this.dataset.configId)">🗑</button>
                     </td>
                 </tr>`).join('')}
             </tbody>
@@ -291,25 +293,42 @@ async function loadRemoteTree(path) {
 }
 
 function renderTree(el, data, side) {
-    if (data.error) { el.innerHTML = `<span class="text-muted">${data.error}</span>`; return; }
+    if (data.error) { el.innerHTML = `<span class="text-muted">${escHtml(data.error)}</span>`; return; }
     const inputId = side === 'local' ? 'config-local-path' : 'config-remote-path';
-    let html = '';
+    el.innerHTML = '';
     if (data.parent !== null && data.parent !== undefined) {
-        html += `<div class="tree-item tree-up" onclick="${side === 'local' ? `loadLocalTree('${data.parent}')` : `loadRemoteTree('${data.parent}')`}">
-                    ↑ ..
-                 </div>`;
+        const upDiv = document.createElement('div');
+        upDiv.className = 'tree-item tree-up';
+        upDiv.textContent = '↑ ..';
+        upDiv.addEventListener('click', () => {
+            if (side === 'local') loadLocalTree(data.parent);
+            else loadRemoteTree(data.parent);
+        });
+        el.appendChild(upDiv);
     }
     (data.dirs || []).forEach(d => {
-        html += `<div class="tree-item" onclick="${side === 'local' ? `loadLocalTree('${d.path}')` : `loadRemoteTree('${d.path}')`}">
-                    📁 ${d.name}
-                    <button class="btn btn-ghost btn-xs tree-select-btn"
-                            onclick="event.stopPropagation(); document.getElementById('${inputId}').value='${d.path}'">
-                        Select
-                    </button>
-                 </div>`;
+        const row = document.createElement('div');
+        row.className = 'tree-item';
+        row.addEventListener('click', () => {
+            if (side === 'local') loadLocalTree(d.path);
+            else loadRemoteTree(d.path);
+        });
+
+        const label = document.createTextNode('📁 ' + d.name + ' ');
+        row.appendChild(label);
+
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-ghost btn-xs tree-select-btn';
+        btn.textContent = 'Select';
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            document.getElementById(inputId).value = d.path;
+        });
+        row.appendChild(btn);
+
+        el.appendChild(row);
     });
-    if (!html) html = '<span class="text-muted">No subfolders</span>';
-    el.innerHTML = html;
+    if (!el.childNodes.length) el.innerHTML = '<span class="text-muted">No subfolders</span>';
 }
 
 /* ── Stats bar (parses rclone --stats 1s output) ── */

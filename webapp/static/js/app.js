@@ -128,7 +128,7 @@ async function loadDashboard() {
             </div>
         `;
     } catch (e) {
-        statusEl.innerHTML = `<div class="stat-card"><div class="stat-value danger">Error loading status</div><div class="stat-sub">${e.message}</div></div>`;
+        statusEl.innerHTML = `<div class="stat-card"><div class="stat-value danger">Error loading status</div><div class="stat-sub">${escHtml(e.message)}</div></div>`;
     }
 
     // Load history
@@ -165,7 +165,7 @@ async function loadSyncConfigs() {
         syncConfigs = await api('/sync-configs');
         renderSyncConfigs(container);
     } catch (e) {
-        container.innerHTML = `<div class="empty-state"><p>Error: ${e.message}</p></div>`;
+        container.innerHTML = `<div class="empty-state"><p>Error: ${escHtml(e.message)}</p></div>`;
     }
 }
 
@@ -203,9 +203,9 @@ function renderSyncConfigs(container) {
                             <td><span class="badge ${c.enabled ? 'badge-success' : 'badge-warning'}">${c.enabled ? 'Active' : 'Disabled'}</span></td>
                             <td>
                                 <div class="btn-group">
-                                    <button class="btn btn-sm btn-primary" onclick="runSync('${c.id}')" title="Run Now">▶ Sync</button>
-                                    <button class="btn btn-sm btn-ghost" onclick="editConfig('${c.id}')" title="Edit">✏️</button>
-                                    <button class="btn btn-sm btn-danger" onclick="deleteConfig('${c.id}')" title="Delete">🗑</button>
+                                    <button class="btn btn-sm btn-primary" data-cfg-id="${escHtml(c.id)}" onclick="runSync(this.dataset.cfgId)" title="Run Now">▶ Sync</button>
+                                    <button class="btn btn-sm btn-ghost" data-cfg-id="${escHtml(c.id)}" onclick="editConfig(this.dataset.cfgId)" title="Edit">✏️</button>
+                                    <button class="btn btn-sm btn-danger" data-cfg-id="${escHtml(c.id)}" onclick="deleteConfig(this.dataset.cfgId)" title="Delete">🗑</button>
                                 </div>
                             </td>
                         </tr>
@@ -376,7 +376,7 @@ async function loadSchedules() {
         syncConfigs = await api('/sync-configs');
         renderSchedules(container);
     } catch (e) {
-        container.innerHTML = `<div class="empty-state"><p>Error: ${e.message}</p></div>`;
+        container.innerHTML = `<div class="empty-state"><p>Error: ${escHtml(e.message)}</p></div>`;
     }
 }
 
@@ -415,14 +415,14 @@ function renderSchedules(container) {
                             <td style="font-size:12px;color:var(--text-secondary)">${s.next_run ? formatRelative(s.next_run) : '—'}</td>
                             <td>
                                 <label class="toggle">
-                                    <input type="checkbox" ${s.enabled ? 'checked' : ''} onchange="toggleSchedule('${s.id}')">
+                                    <input type="checkbox" ${s.enabled ? 'checked' : ''} data-sched-id="${escHtml(s.id)}" onchange="toggleSchedule(this.dataset.schedId)">
                                     <span class="slider"></span>
                                 </label>
                             </td>
                             <td>
                                 <div class="btn-group">
-                                    <button class="btn btn-sm btn-ghost" onclick="editSchedule('${s.id}')">✏️</button>
-                                    <button class="btn btn-sm btn-danger" onclick="deleteSchedule('${s.id}')">🗑</button>
+                                    <button class="btn btn-sm btn-ghost" data-sched-id="${escHtml(s.id)}" onclick="editSchedule(this.dataset.schedId)">✏️</button>
+                                    <button class="btn btn-sm btn-danger" data-sched-id="${escHtml(s.id)}" onclick="deleteSchedule(this.dataset.schedId)">🗑</button>
                                 </div>
                             </td>
                         </tr>`;
@@ -619,7 +619,7 @@ async function browseLocal(path) {
         });
         listEl.innerHTML = html;
     } catch (e) {
-        listEl.innerHTML = `<div class="empty-state"><p>Error: ${e.message}</p></div>`;
+        listEl.innerHTML = `<div class="empty-state"><p>Error: ${escHtml(e.message)}</p></div>`;
     }
 }
 
@@ -676,7 +676,7 @@ async function browseRemote(path) {
         });
         listEl.innerHTML = html;
     } catch (e) {
-        listEl.innerHTML = `<div class="empty-state"><p>Error loading remote: ${e.message}</p></div>`;
+        listEl.innerHTML = `<div class="empty-state"><p>Error loading remote: ${escHtml(e.message)}</p></div>`;
     }
 }
 

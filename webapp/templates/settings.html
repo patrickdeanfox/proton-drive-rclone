@@ -103,9 +103,9 @@ function renderSettingsGroup(containerId, fields, config) {
             ).join('');
             input = `<select class="setting-input" data-key="${f.key}" onchange="markChanged(this)">${opts}</select>`;
         } else if (f.type === 'number') {
-            input = `<input type="number" class="setting-input" data-key="${f.key}" value="${val}" oninput="markChanged(this)">`;
+            input = `<input type="number" class="setting-input" data-key="${escHtml(f.key)}" value="${escHtml(String(val))}" oninput="markChanged(this)">`;
         } else {
-            input = `<input type="text" class="setting-input" data-key="${f.key}" value="${val}" oninput="markChanged(this)">`;
+            input = `<input type="text" class="setting-input" data-key="${escHtml(f.key)}" value="${escHtml(String(val))}" oninput="markChanged(this)">`;
         }
         return `
         <div class="setting-row">
