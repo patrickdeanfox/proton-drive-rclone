@@ -39,21 +39,6 @@ function formatElapsed(ms) {
     return `${s}s`;
 }
 
-function fileIcon(name, isDir) {
-    if (isDir) return '📁';
-    const ext = name.split('.').pop().toLowerCase();
-    const map = {
-        pdf: '📕', doc: '📄', docx: '📄', txt: '📝', md: '📝',
-        jpg: '🖼️', jpeg: '🖼️', png: '🖼️', gif: '🖼️', svg: '🖼️', webp: '🖼️',
-        mp4: '🎬', mkv: '🎬', avi: '🎬', mov: '🎬',
-        mp3: '🎵', flac: '🎵', wav: '🎵', ogg: '🎵',
-        zip: '📦', tar: '📦', gz: '📦', '7z': '📦', rar: '📦',
-        py: '🐍', js: '📜', ts: '📜', html: '🌐', css: '🎨',
-        sh: '⚙️', json: '📋', yml: '📋', yaml: '📋',
-    };
-    return map[ext] || '📄';
-}
-
 function escHtml(s) {
     const d = document.createElement('div');
     d.textContent = s || '';
@@ -71,9 +56,13 @@ function showToast(message, type = 'info') {
     if (!container) return;
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
-    toast.textContent = message;
+    toast.innerHTML = `<i class="fas fa-${type === 'success' ? 'check-circle' : type === 'error' ? 'exclamation-circle' : type === 'warn' ? 'exclamation-triangle' : 'info-circle'}" style="margin-right:6px"></i>${escHtml(message)}`;
     container.appendChild(toast);
-    setTimeout(() => { toast.style.opacity = '0'; toast.style.transform = 'translateX(100px)'; setTimeout(() => toast.remove(), 300); }, 4000);
+    setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateX(100px)';
+        setTimeout(() => toast.remove(), 300);
+    }, 4000);
 }
 
 /* ─── API Helper ─────────────────────────────────────────────────── */
@@ -98,17 +87,26 @@ function closeModal(id) {
     document.getElementById(id)?.classList.remove('active');
 }
 
-// Close modals on overlay click
 document.addEventListener('click', e => {
     if (e.target.classList.contains('modal-overlay')) {
         e.target.classList.remove('active');
     }
 });
 
+/* ─── Tab Helpers ─────────────────────────────────────────────────── */
+
+function switchTab(tabGroup, tabId) {
+    // Deactivate all tabs in group
+    document.querySelectorAll(`[data-tab-group="${tabGroup}"] .tab`).forEach(t => t.classList.remove('active'));
+    document.querySelectorAll(`[data-tab-group="${tabGroup}"] .tab-content`).forEach(t => t.classList.remove('active'));
+    // Activate selected
+    document.querySelector(`[data-tab-group="${tabGroup}"] .tab[data-tab="${tabId}"]`)?.classList.add('active');
+    document.getElementById(tabId)?.classList.add('active');
+}
+
 /* ═══════════════════════════════════════════════════════════════════
    Global Sync State Manager
-   Persists sync state across page changes using sessionStorage
-   and polls the server for active syncs on every page.
+   Uses both HTTP polling AND WebSocket for real-time updates.
    ═══════════════════════════════════════════════════════════════════ */
 
 const SyncManager = {
@@ -116,16 +114,29 @@ const SyncManager = {
     _activeSyncs: {},
 
     init() {
-        // Start global sync status polling on every page
         this.poll();
         this._pollTimer = setInterval(() => this.poll(), 2000);
 
-        // Warn before leaving if syncs are running
+        // Also listen for WebSocket sync events for faster updates
+        if (typeof ProgressManager !== 'undefined') {
+            ProgressManager.onSync((event, data) => {
+                if (event === 'sync_progress' && data.config_id) {
+                    if (this._activeSyncs[data.config_id]) {
+                        this._activeSyncs[data.config_id].progress = {
+                            ...this._activeSyncs[data.config_id].progress,
+                            ...data.progress
+                        };
+                        this.updateGlobalIndicator(this._activeSyncs);
+                    }
+                }
+            });
+        }
+
         window.addEventListener('beforeunload', (e) => {
             const running = Object.values(this._activeSyncs).filter(s => s.running);
             if (running.length > 0) {
                 e.preventDefault();
-                e.returnValue = 'A sync is currently running. Are you sure you want to leave?';
+                e.returnValue = 'A sync is currently running.';
             }
         });
     },
@@ -154,28 +165,25 @@ const SyncManager = {
         const [configId, syncInfo] = running[0];
         const pct = syncInfo.progress?.percent || 0;
         const name = syncInfo.name || 'Sync';
+        const speed = syncInfo.progress?.speed || '';
 
         indicator.innerHTML = `
             <div class="global-sync-icon"><span class="spinner" style="width:14px;height:14px;border-width:2px"></span></div>
             <div class="global-sync-info">
-                <div class="global-sync-name">${escHtml(name)}</div>
+                <div class="global-sync-name">${escHtml(name)} ${running.length > 1 ? `<span style="opacity:0.6">+${running.length - 1}</span>` : ''}</div>
                 <div class="global-sync-bar-wrap">
                     <div class="global-sync-bar">
                         <div class="global-sync-bar-fill" style="width:${pct}%"></div>
                     </div>
                     <span class="global-sync-pct">${pct}%</span>
                 </div>
+                ${speed ? `<div style="font-size:10px;color:var(--text-muted);margin-top:2px">${escHtml(speed)}</div>` : ''}
             </div>
         `;
     },
 
-    getActiveSyncs() {
-        return this._activeSyncs;
-    },
-
-    isRunning(configId) {
-        return this._activeSyncs[configId]?.running || false;
-    },
+    getActiveSyncs() { return this._activeSyncs; },
+    isRunning(configId) { return this._activeSyncs[configId]?.running || false; },
 };
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -187,38 +195,39 @@ async function loadDashboard() {
     const historyEl = document.getElementById('dashboard-history');
     if (!statusEl) return;
 
-    statusEl.innerHTML = '<div class="loading-overlay"><span class="spinner"></span> Loading status...</div>';
+    // Show skeleton while loading
+    statusEl.innerHTML = Array(6).fill('<div class="stat-card"><div class="skeleton skeleton-title"></div><div class="skeleton skeleton-text" style="width:80%"></div></div>').join('');
 
     try {
         const status = await api('/status');
         statusEl.innerHTML = `
             <div class="stat-card">
                 <div class="stat-label">rclone</div>
-                <div class="stat-value ${status.rclone_installed ? 'success' : 'danger'}">${status.rclone_installed ? '✓ Installed' : '✗ Not Found'}</div>
+                <div class="stat-value ${status.rclone_installed ? 'success' : 'danger'}">${status.rclone_installed ? '<i class="fas fa-check-circle"></i> Installed' : '<i class="fas fa-times-circle"></i> Not Found'}</div>
                 <div class="stat-sub">${status.rclone_version || 'Install rclone to get started'}</div>
             </div>
             <div class="stat-card">
                 <div class="stat-label">Remote</div>
-                <div class="stat-value ${status.remote_connected ? 'success' : 'warning'}">${status.remote_connected ? '● Connected' : '● Offline'}</div>
-                <div class="stat-sub">${status.remote_name}:</div>
+                <div class="stat-value ${status.remote_connected ? 'success' : 'warning'}">${status.remote_connected ? '<i class="fas fa-circle"></i> Connected' : '<i class="far fa-circle"></i> Offline'}</div>
+                <div class="stat-sub">${escHtml(status.remote_name)}:</div>
             </div>
             <div class="stat-card">
                 <div class="stat-label">Mount</div>
-                <div class="stat-value ${status.mount_active ? 'success' : 'warning'}">${status.mount_active ? '● Active' : '○ Inactive'}</div>
-                <div class="stat-sub">${status.mount_dir}</div>
+                <div class="stat-value ${status.mount_active ? 'success' : 'warning'}">${status.mount_active ? '<i class="fas fa-circle"></i> Active' : '<i class="far fa-circle"></i> Inactive'}</div>
+                <div class="stat-sub">${escHtml(status.mount_dir)}</div>
             </div>
             <div class="stat-card">
                 <div class="stat-label">Local Files</div>
                 <div class="stat-value">${status.local_files.toLocaleString()}</div>
-                <div class="stat-sub">${status.local_size} in ${status.sync_dir}</div>
+                <div class="stat-sub">${status.local_size} in sync dir</div>
             </div>
             <div class="stat-card">
-                <div class="stat-label">Active Schedules</div>
+                <div class="stat-label">Schedules</div>
                 <div class="stat-value">${status.active_schedules}</div>
-                <div class="stat-sub">automated sync jobs</div>
+                <div class="stat-sub">automated jobs</div>
             </div>
             <div class="stat-card">
-                <div class="stat-label">Running Syncs</div>
+                <div class="stat-label">Running</div>
                 <div class="stat-value ${status.running_syncs > 0 ? 'success' : ''}">${status.running_syncs}</div>
                 <div class="stat-sub">active transfers</div>
             </div>
@@ -227,18 +236,17 @@ async function loadDashboard() {
         statusEl.innerHTML = `<div class="stat-card"><div class="stat-value danger">Error loading status</div><div class="stat-sub">${e.message}</div></div>`;
     }
 
-    // Load history
     if (historyEl) {
         try {
             const history = await api('/sync-history');
             if (history.length === 0) {
-                historyEl.innerHTML = '<div class="empty-state"><p>No sync history yet. Run a sync or set up a schedule.</p></div>';
+                historyEl.innerHTML = '<div class="empty-state"><p>No sync history yet. Run a sync to get started.</p></div>';
             } else {
                 historyEl.innerHTML = history.slice(0, 10).map(h => `
                     <div class="history-entry">
                         <span class="history-dot ${h.success ? 'success' : 'error'}"></span>
                         <span class="history-time">${formatDate(h.timestamp)}</span>
-                        <span class="history-name">${h.job_name || 'Manual Sync'}</span>
+                        <span class="history-name">${escHtml(h.job_name || 'Manual Sync')}</span>
                         <span class="badge ${h.success ? 'badge-success' : 'badge-danger'}">${h.success ? 'OK' : 'Failed'}</span>
                     </div>
                 `).join('');
@@ -248,71 +256,26 @@ async function loadDashboard() {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
-   Sync Configs (Folders) — used from folders.html inline script
+   Sync Configs
    ═══════════════════════════════════════════════════════════════════ */
 
 let syncConfigs = [];
 
 async function loadSyncConfigs() {
-    const container = document.getElementById('sync-configs-list');
-    if (!container) return;
-
     try {
         syncConfigs = await api('/sync-configs');
-        renderSyncConfigs(container);
     } catch (e) {
-        container.innerHTML = `<div class="empty-state"><p>Error: ${e.message}</p></div>`;
+        console.error('Failed to load sync configs:', e);
     }
-}
-
-function renderSyncConfigs(container) {
-    if (syncConfigs.length === 0) {
-        container.innerHTML = `
-            <div class="empty-state">
-                <div class="empty-icon">📂</div>
-                <p>No sync configurations yet. Create one to start syncing folders.</p>
-                <button class="btn btn-primary" onclick="openModal('config-modal')">+ New Sync Config</button>
-            </div>`;
-        return;
-    }
-
-    container.innerHTML = `
-        <div class="table-wrap">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Name</th>
-                        <th>Local Path</th>
-                        <th>Remote Path</th>
-                        <th>Direction</th>
-                        <th>Status</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${syncConfigs.map(c => `
-                        <tr>
-                            <td><strong>${escHtml(c.name)}</strong></td>
-                            <td style="font-family:var(--font-mono);font-size:12px;">${escHtml(c.local_path)}</td>
-                            <td style="font-family:var(--font-mono);font-size:12px;">${escHtml(c.remote_path || '/')}</td>
-                            <td><span class="badge badge-accent">${directionLabel(c.direction)}</span></td>
-                            <td><span class="badge ${c.enabled ? 'badge-success' : 'badge-warning'}">${c.enabled ? 'Active' : 'Disabled'}</span></td>
-                            <td>
-                                <div class="btn-group">
-                                    <button class="btn btn-sm btn-primary" onclick="runSync('${c.id}')" title="Run Now">▶ Sync</button>
-                                    <button class="btn btn-sm btn-ghost" onclick="editConfig('${c.id}')" title="Edit">✏️</button>
-                                    <button class="btn btn-sm btn-danger" onclick="deleteConfig('${c.id}')" title="Delete">🗑</button>
-                                </div>
-                            </td>
-                        </tr>
-                    `).join('')}
-                </tbody>
-            </table>
-        </div>`;
+    return syncConfigs;
 }
 
 function directionLabel(d) {
-    return { bisync: '⇄ Bisync', push: '→ Local → Cloud', pull: '← Cloud → Local' }[d] || d;
+    return {
+        bisync: '<i class="fas fa-arrows-left-right"></i> Bisync',
+        push: '<i class="fas fa-arrow-right"></i> Local → Cloud',
+        pull: '<i class="fas fa-arrow-left"></i> Cloud → Local'
+    }[d] || d;
 }
 
 /* ─── Config Modal ───────────────────────────────────────────────── */
@@ -321,12 +284,13 @@ let editingConfigId = null;
 
 function openNewConfig() {
     editingConfigId = null;
-    document.getElementById('config-name').value = '';
-    document.getElementById('config-local-path').value = '';
-    document.getElementById('config-remote-path').value = '';
-    document.getElementById('config-direction').value = 'push';
-    document.getElementById('config-excludes').value = '';
-    document.getElementById('config-modal-title').textContent = '📂 New Sync Configuration';
+    const el = (id) => document.getElementById(id);
+    if (el('config-name')) el('config-name').value = '';
+    if (el('config-local-path')) el('config-local-path').value = '';
+    if (el('config-remote-path')) el('config-remote-path').value = '';
+    if (el('config-direction')) el('config-direction').value = 'push';
+    if (el('config-excludes')) el('config-excludes').value = '';
+    if (el('config-modal-title')) el('config-modal-title').textContent = 'New Sync Configuration';
     openModal('config-modal');
     if (typeof loadLocalFolderPicker === 'function') loadLocalFolderPicker('');
     if (typeof loadRemoteFolderPicker === 'function') loadRemoteFolderPicker('');
@@ -336,15 +300,14 @@ function editConfig(id) {
     const c = syncConfigs.find(x => x.id === id);
     if (!c) return;
     editingConfigId = id;
-    document.getElementById('config-name').value = c.name;
-    document.getElementById('config-local-path').value = c.local_path;
-    document.getElementById('config-remote-path').value = c.remote_path;
-    document.getElementById('config-direction').value = c.direction;
-    document.getElementById('config-excludes').value = c.exclude_patterns || '';
-    document.getElementById('config-modal-title').textContent = '✏️ Edit Sync Configuration';
+    const el = (id) => document.getElementById(id);
+    if (el('config-name')) el('config-name').value = c.name;
+    if (el('config-local-path')) el('config-local-path').value = c.local_path;
+    if (el('config-remote-path')) el('config-remote-path').value = c.remote_path;
+    if (el('config-direction')) el('config-direction').value = c.direction;
+    if (el('config-excludes')) el('config-excludes').value = c.exclude_patterns || '';
+    if (el('config-modal-title')) el('config-modal-title').textContent = 'Edit Sync Configuration';
     openModal('config-modal');
-    if (typeof loadLocalFolderPicker === 'function') loadLocalFolderPicker(c.local_path);
-    if (typeof loadRemoteFolderPicker === 'function') loadRemoteFolderPicker(c.remote_path);
 }
 
 async function saveConfig() {
@@ -355,11 +318,7 @@ async function saveConfig() {
         direction: document.getElementById('config-direction').value,
         exclude_patterns: document.getElementById('config-excludes').value.trim(),
     };
-
-    if (!data.local_path) {
-        showToast('Please specify a local path', 'error');
-        return;
-    }
+    if (!data.local_path) { showToast('Please specify a local path', 'error'); return; }
 
     try {
         if (editingConfigId) {
@@ -370,30 +329,147 @@ async function saveConfig() {
             showToast('Configuration created', 'success');
         }
         closeModal('config-modal');
-        loadSyncConfigs();
+        if (typeof refreshSyncTab === 'function') refreshSyncTab();
     } catch (e) {
         showToast('Error saving config: ' + e.message, 'error');
     }
 }
 
 async function deleteConfig(id) {
-    if (!confirm('Delete this sync configuration?')) return;
+    if (!confirm('Delete this sync configuration and related schedules?')) return;
     try {
         await api(`/sync-configs/${id}`, { method: 'DELETE' });
         showToast('Configuration deleted', 'success');
-        loadSyncConfigs();
+        if (typeof refreshSyncTab === 'function') refreshSyncTab();
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
     }
 }
 
 async function runSync(id) {
-    showToast('Sync started...', 'info');
+    showToast('Starting sync...', 'info');
     try {
         const res = await api(`/sync-configs/${id}/run`, { method: 'POST' });
-        if (!res.success) {
-            showToast(res.message || 'Failed to start sync', 'error');
+        if (!res.success) showToast(res.message || 'Failed to start', 'error');
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Schedules
+   ═══════════════════════════════════════════════════════════════════ */
+
+let schedules = [];
+
+async function loadSchedules() {
+    try {
+        schedules = await api('/schedules');
+    } catch (e) {
+        console.error('Failed to load schedules:', e);
+    }
+    return schedules;
+}
+
+function scheduleDesc(s) {
+    if (s.schedule_type === 'interval') return `Every ${s.interval_minutes}m`;
+    if (s.schedule_type === 'daily') return `Daily at ${s.daily_time}`;
+    if (s.schedule_type === 'cron') return `Cron: ${s.cron_expression}`;
+    return s.schedule_type;
+}
+
+let editingScheduleId = null;
+
+function openNewSchedule() {
+    editingScheduleId = null;
+    const el = (id) => document.getElementById(id);
+    if (el('sched-name')) el('sched-name').value = '';
+    if (el('sched-config')) el('sched-config').value = '';
+    if (el('sched-type')) el('sched-type').value = 'interval';
+    if (el('sched-interval')) el('sched-interval').value = '30';
+    if (el('sched-daily-time')) el('sched-daily-time').value = '02:00';
+    if (el('sched-cron')) el('sched-cron').value = '0 * * * *';
+    if (el('sched-modal-title')) el('sched-modal-title').textContent = 'New Schedule';
+    updateScheduleFields();
+    populateConfigDropdown();
+    openModal('schedule-modal');
+}
+
+function editSchedule(id) {
+    const s = schedules.find(x => x.id === id);
+    if (!s) return;
+    editingScheduleId = id;
+    const el = (fid) => document.getElementById(fid);
+    if (el('sched-name')) el('sched-name').value = s.name;
+    if (el('sched-type')) el('sched-type').value = s.schedule_type;
+    if (el('sched-interval')) el('sched-interval').value = s.interval_minutes || 30;
+    if (el('sched-daily-time')) el('sched-daily-time').value = s.daily_time || '02:00';
+    if (el('sched-cron')) el('sched-cron').value = s.cron_expression || '0 * * * *';
+    if (el('sched-modal-title')) el('sched-modal-title').textContent = 'Edit Schedule';
+    updateScheduleFields();
+    populateConfigDropdown(s.config_id);
+    openModal('schedule-modal');
+}
+
+function populateConfigDropdown(selectedId) {
+    const sel = document.getElementById('sched-config');
+    if (!sel) return;
+    sel.innerHTML = '<option value="">— Select a sync config —</option>';
+    syncConfigs.forEach(c => {
+        sel.innerHTML += `<option value="${c.id}" ${c.id === selectedId ? 'selected' : ''}>${escHtml(c.name)} (${escHtml(c.local_path)})</option>`;
+    });
+}
+
+function updateScheduleFields() {
+    const type = document.getElementById('sched-type')?.value;
+    const el = (id) => document.getElementById(id);
+    if (el('sched-interval-group')) el('sched-interval-group').style.display = type === 'interval' ? '' : 'none';
+    if (el('sched-daily-group')) el('sched-daily-group').style.display = type === 'daily' ? '' : 'none';
+    if (el('sched-cron-group')) el('sched-cron-group').style.display = type === 'cron' ? '' : 'none';
+}
+
+async function saveSchedule() {
+    const data = {
+        name: document.getElementById('sched-name').value.trim() || 'Untitled Schedule',
+        config_id: document.getElementById('sched-config').value,
+        schedule_type: document.getElementById('sched-type').value,
+        interval_minutes: parseInt(document.getElementById('sched-interval').value) || 30,
+        daily_time: document.getElementById('sched-daily-time').value,
+        cron_expression: document.getElementById('sched-cron').value.trim(),
+        enabled: true,
+    };
+    if (!data.config_id) { showToast('Please select a sync configuration', 'error'); return; }
+
+    try {
+        if (editingScheduleId) {
+            await api(`/schedules/${editingScheduleId}`, { method: 'PUT', body: data });
+            showToast('Schedule updated', 'success');
+        } else {
+            await api('/schedules', { method: 'POST', body: data });
+            showToast('Schedule created', 'success');
         }
+        closeModal('schedule-modal');
+        if (typeof refreshSchedulesTab === 'function') refreshSchedulesTab();
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function deleteSchedule(id) {
+    if (!confirm('Delete this schedule?')) return;
+    try {
+        await api(`/schedules/${id}`, { method: 'DELETE' });
+        showToast('Schedule deleted', 'success');
+        if (typeof refreshSchedulesTab === 'function') refreshSchedulesTab();
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function toggleSchedule(id) {
+    try {
+        await api(`/schedules/${id}/toggle`, { method: 'POST' });
+        if (typeof refreshSchedulesTab === 'function') refreshSchedulesTab();
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
     }
@@ -404,10 +480,9 @@ async function runSync(id) {
 async function loadLocalFolderPicker(initialPath) {
     const el = document.getElementById('local-folder-tree');
     if (!el) return;
-    const path = initialPath || '';
     el.innerHTML = '<div class="loading-overlay"><span class="spinner"></span></div>';
     try {
-        const data = await api(`/browse/local/tree?path=${encodeURIComponent(path || '~')}`);
+        const data = await api(`/browse/local/tree?path=${encodeURIComponent(initialPath || '~')}`);
         let html = '';
         if (data.parent) {
             html += `<div class="folder-tree-item folder-tree-back" onclick="loadLocalFolderPicker('${escAttr(data.parent)}')">
@@ -415,7 +490,7 @@ async function loadLocalFolderPicker(initialPath) {
             </div>`;
         }
         html += `<div class="folder-tree-item selected" onclick="document.getElementById('config-local-path').value='${escAttr(data.path)}'">
-            <span class="ft-icon">📂</span> <strong>${escHtml(data.path)}</strong> (select this)
+            <span class="ft-icon">📂</span> <strong>${escHtml(data.path)}</strong> (select)
         </div>`;
         data.dirs.forEach(d => {
             html += `<div class="folder-tree-item" onclick="loadLocalFolderPicker('${escAttr(d.path)}'); document.getElementById('config-local-path').value='${escAttr(d.path)}'">
@@ -439,7 +514,7 @@ async function loadRemoteFolderPicker(initialPath) {
             </div>`;
         }
         html += `<div class="folder-tree-item selected" onclick="document.getElementById('config-remote-path').value='${escAttr(data.path === '/' ? '' : data.path)}'">
-            <span class="ft-icon">☁️</span> <strong>${escHtml(data.path || '/ (root)')}</strong> (select this)
+            <span class="ft-icon">☁️</span> <strong>${escHtml(data.path || '/ (root)')}</strong> (select)
         </div>`;
         data.dirs.forEach(d => {
             html += `<div class="folder-tree-item" onclick="loadRemoteFolderPicker('${escAttr(d.path)}'); document.getElementById('config-remote-path').value='${escAttr(d.path)}'">
@@ -447,320 +522,7 @@ async function loadRemoteFolderPicker(initialPath) {
             </div>`;
         });
         el.innerHTML = html;
-    } catch { el.innerHTML = '<div style="padding:12px;color:var(--text-muted)">Could not load remote folders (is rclone configured?)</div>'; }
-}
-
-/* ═══════════════════════════════════════════════════════════════════
-   Schedules
-   ═══════════════════════════════════════════════════════════════════ */
-
-let schedules = [];
-
-async function loadSchedules() {
-    const container = document.getElementById('schedules-list');
-    if (!container) return;
-
-    try {
-        schedules = await api('/schedules');
-        syncConfigs = await api('/sync-configs');
-        renderSchedules(container);
-    } catch (e) {
-        container.innerHTML = `<div class="empty-state"><p>Error: ${e.message}</p></div>`;
-    }
-}
-
-function renderSchedules(container) {
-    if (schedules.length === 0) {
-        container.innerHTML = `
-            <div class="empty-state">
-                <div class="empty-icon">🕐</div>
-                <p>No schedules yet. Create one to automate your syncs.</p>
-                <button class="btn btn-primary" onclick="openNewSchedule()">+ New Schedule</button>
-            </div>`;
-        return;
-    }
-
-    container.innerHTML = `
-        <div class="table-wrap">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Name</th>
-                        <th>Sync Config</th>
-                        <th>Schedule</th>
-                        <th>Next Run</th>
-                        <th>Enabled</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${schedules.map(s => {
-                        const cfg = syncConfigs.find(c => c.id === s.config_id);
-                        return `
-                        <tr>
-                            <td><strong>${escHtml(s.name)}</strong></td>
-                            <td>${cfg ? escHtml(cfg.name) : '<em style="color:var(--text-muted)">unknown</em>'}</td>
-                            <td><span class="badge badge-accent">${scheduleDesc(s)}</span></td>
-                            <td style="font-size:12px;color:var(--text-secondary)">${s.next_run ? formatRelative(s.next_run) : '—'}</td>
-                            <td>
-                                <label class="toggle">
-                                    <input type="checkbox" ${s.enabled ? 'checked' : ''} onchange="toggleSchedule('${s.id}')">
-                                    <span class="slider"></span>
-                                </label>
-                            </td>
-                            <td>
-                                <div class="btn-group">
-                                    <button class="btn btn-sm btn-ghost" onclick="editSchedule('${s.id}')">✏️</button>
-                                    <button class="btn btn-sm btn-danger" onclick="deleteSchedule('${s.id}')">🗑</button>
-                                </div>
-                            </td>
-                        </tr>`;
-                    }).join('')}
-                </tbody>
-            </table>
-        </div>`;
-}
-
-function scheduleDesc(s) {
-    if (s.schedule_type === 'interval') return `Every ${s.interval_minutes}m`;
-    if (s.schedule_type === 'daily') return `Daily at ${s.daily_time}`;
-    if (s.schedule_type === 'cron') return `Cron: ${s.cron_expression}`;
-    return s.schedule_type;
-}
-
-/* ─── Schedule Modal ─────────────────────────────────────────────── */
-
-let editingScheduleId = null;
-
-function openNewSchedule() {
-    editingScheduleId = null;
-    document.getElementById('sched-name').value = '';
-    document.getElementById('sched-config').value = '';
-    document.getElementById('sched-type').value = 'interval';
-    document.getElementById('sched-interval').value = '30';
-    document.getElementById('sched-daily-time').value = '02:00';
-    document.getElementById('sched-cron').value = '0 * * * *';
-    document.getElementById('sched-modal-title').textContent = '🕐 New Schedule';
-    updateScheduleFields();
-    populateConfigDropdown();
-    openModal('schedule-modal');
-}
-
-function editSchedule(id) {
-    const s = schedules.find(x => x.id === id);
-    if (!s) return;
-    editingScheduleId = id;
-    document.getElementById('sched-name').value = s.name;
-    document.getElementById('sched-type').value = s.schedule_type;
-    document.getElementById('sched-interval').value = s.interval_minutes || 30;
-    document.getElementById('sched-daily-time').value = s.daily_time || '02:00';
-    document.getElementById('sched-cron').value = s.cron_expression || '0 * * * *';
-    document.getElementById('sched-modal-title').textContent = '✏️ Edit Schedule';
-    updateScheduleFields();
-    populateConfigDropdown(s.config_id);
-    openModal('schedule-modal');
-}
-
-function populateConfigDropdown(selectedId) {
-    const sel = document.getElementById('sched-config');
-    sel.innerHTML = '<option value="">— Select a sync config —</option>';
-    syncConfigs.forEach(c => {
-        sel.innerHTML += `<option value="${c.id}" ${c.id === selectedId ? 'selected' : ''}>${escHtml(c.name)} (${escHtml(c.local_path)})</option>`;
-    });
-}
-
-function updateScheduleFields() {
-    const type = document.getElementById('sched-type').value;
-    document.getElementById('sched-interval-group').style.display = type === 'interval' ? '' : 'none';
-    document.getElementById('sched-daily-group').style.display = type === 'daily' ? '' : 'none';
-    document.getElementById('sched-cron-group').style.display = type === 'cron' ? '' : 'none';
-}
-
-async function saveSchedule() {
-    const data = {
-        name: document.getElementById('sched-name').value.trim() || 'Untitled Schedule',
-        config_id: document.getElementById('sched-config').value,
-        schedule_type: document.getElementById('sched-type').value,
-        interval_minutes: parseInt(document.getElementById('sched-interval').value) || 30,
-        daily_time: document.getElementById('sched-daily-time').value,
-        cron_expression: document.getElementById('sched-cron').value.trim(),
-        enabled: true,
-    };
-
-    if (!data.config_id) {
-        showToast('Please select a sync configuration', 'error');
-        return;
-    }
-
-    try {
-        if (editingScheduleId) {
-            await api(`/schedules/${editingScheduleId}`, { method: 'PUT', body: data });
-            showToast('Schedule updated', 'success');
-        } else {
-            await api('/schedules', { method: 'POST', body: data });
-            showToast('Schedule created', 'success');
-        }
-        closeModal('schedule-modal');
-        loadSchedules();
-    } catch (e) {
-        showToast('Error: ' + e.message, 'error');
-    }
-}
-
-async function deleteSchedule(id) {
-    if (!confirm('Delete this schedule?')) return;
-    try {
-        await api(`/schedules/${id}`, { method: 'DELETE' });
-        showToast('Schedule deleted', 'success');
-        loadSchedules();
-    } catch (e) {
-        showToast('Error: ' + e.message, 'error');
-    }
-}
-
-async function toggleSchedule(id) {
-    try {
-        await api(`/schedules/${id}/toggle`, { method: 'POST' });
-        loadSchedules();
-    } catch (e) {
-        showToast('Error: ' + e.message, 'error');
-    }
-}
-
-/* ═══════════════════════════════════════════════════════════════════
-   File Browser
-   ═══════════════════════════════════════════════════════════════════ */
-
-let localBrowserPath = '';
-let remoteBrowserPath = '';
-
-async function loadFileBrowser() {
-    const localPane = document.getElementById('local-file-list');
-    const remotePane = document.getElementById('remote-file-list');
-    if (!localPane || !remotePane) return;
-
-    try {
-        const config = await api('/config');
-        if (!localBrowserPath) localBrowserPath = config.SYNC_DIR || '';
-        browseLocal(localBrowserPath);
-        browseRemote(remoteBrowserPath);
-    } catch {
-        browseLocal('');
-        browseRemote('');
-    }
-}
-
-async function browseLocal(path) {
-    localBrowserPath = path;
-    const listEl = document.getElementById('local-file-list');
-    const crumbEl = document.getElementById('local-breadcrumb');
-    if (!listEl) return;
-
-    listEl.innerHTML = '<div class="loading-overlay"><span class="spinner"></span></div>';
-
-    try {
-        const data = await api(`/browse/local?path=${encodeURIComponent(path)}`);
-        if (data.error) {
-            if (path && path !== '/home') {
-                browseLocal('/home');
-                return;
-            }
-            listEl.innerHTML = `<div class="empty-state"><p>${escHtml(data.error)}</p></div>`;
-            return;
-        }
-        localBrowserPath = data.path;
-
-        if (crumbEl) {
-            const parts = data.path.split('/').filter(Boolean);
-            let crumbs = `<span class="crumb" onclick="browseLocal('/')">/</span>`;
-            let acc = '';
-            parts.forEach(p => {
-                acc += '/' + p;
-                const a = acc;
-                crumbs += `<span class="sep">/</span><span class="crumb" onclick="browseLocal('${escAttr(a)}')">${escHtml(p)}</span>`;
-            });
-            crumbEl.innerHTML = crumbs;
-        }
-
-        let html = '';
-        if (data.parent) {
-            html += `<div class="file-entry dir" onclick="browseLocal('${escAttr(data.parent)}')">
-                <span class="file-icon">⬆️</span>
-                <span class="file-name">..</span>
-                <span class="file-size"></span>
-                <span class="file-date"></span>
-            </div>`;
-        }
-        if (data.entries.length === 0) {
-            html += '<div class="empty-state" style="padding:24px"><p>Empty directory</p></div>';
-        }
-        data.entries.forEach(e => {
-            html += `<div class="file-entry ${e.is_dir ? 'dir' : ''}" ${e.is_dir ? `onclick="browseLocal('${escAttr(e.path)}')"` : ''}>
-                <span class="file-icon">${fileIcon(e.name, e.is_dir)}</span>
-                <span class="file-name">${escHtml(e.name)}</span>
-                <span class="file-size">${e.is_dir ? '' : formatSize(e.size)}</span>
-                <span class="file-date">${formatDate(e.modified)}</span>
-            </div>`;
-        });
-        listEl.innerHTML = html;
-    } catch (e) {
-        listEl.innerHTML = `<div class="empty-state"><p>Error: ${e.message}</p></div>`;
-    }
-}
-
-async function browseRemote(path) {
-    remoteBrowserPath = path;
-    const listEl = document.getElementById('remote-file-list');
-    const crumbEl = document.getElementById('remote-breadcrumb');
-    if (!listEl) return;
-
-    listEl.innerHTML = '<div class="loading-overlay"><span class="spinner"></span></div>';
-
-    try {
-        const data = await api(`/browse/remote?path=${encodeURIComponent(path)}`);
-        if (data.error) {
-            listEl.innerHTML = `<div class="empty-state"><p>${escHtml(data.error)}</p><p style="font-size:12px;margin-top:8px;color:var(--text-muted)">Make sure rclone is installed and configured with a Proton Drive remote.</p></div>`;
-            return;
-        }
-        remoteBrowserPath = data.path === '/' ? '' : data.path;
-
-        if (crumbEl) {
-            const displayPath = data.path || '/';
-            const parts = displayPath.split('/').filter(Boolean);
-            let crumbs = `<span class="crumb" onclick="browseRemote('')">☁️ /</span>`;
-            let acc = '';
-            parts.forEach(p => {
-                acc += (acc ? '/' : '') + p;
-                const a = acc;
-                crumbs += `<span class="sep">/</span><span class="crumb" onclick="browseRemote('${escAttr(a)}')">${escHtml(p)}</span>`;
-            });
-            crumbEl.innerHTML = crumbs;
-        }
-
-        let html = '';
-        if (data.parent !== null && data.parent !== undefined) {
-            html += `<div class="file-entry dir" onclick="browseRemote('${escAttr(data.parent || '')}')">
-                <span class="file-icon">⬆️</span>
-                <span class="file-name">..</span>
-                <span class="file-size"></span>
-                <span class="file-date"></span>
-            </div>`;
-        }
-        if (data.entries.length === 0) {
-            html += '<div class="empty-state" style="padding:24px"><p>Empty directory</p></div>';
-        }
-        data.entries.forEach(e => {
-            html += `<div class="file-entry ${e.is_dir ? 'dir' : ''}" ${e.is_dir ? `onclick="browseRemote('${escAttr(e.path)}')"` : ''}>
-                <span class="file-icon">${fileIcon(e.name, e.is_dir)}</span>
-                <span class="file-name">${escHtml(e.name)}</span>
-                <span class="file-size">${e.is_dir ? '' : formatSize(e.size)}</span>
-                <span class="file-date">${formatDate(e.modified)}</span>
-            </div>`;
-        });
-        listEl.innerHTML = html;
-    } catch (e) {
-        listEl.innerHTML = `<div class="empty-state"><p>Error loading remote: ${e.message}</p></div>`;
-    }
+    } catch { el.innerHTML = '<div style="padding:12px;color:var(--text-muted)">Could not load remote folders</div>'; }
 }
 
 /* ─── Quick Actions ──────────────────────────────────────────────── */
@@ -788,18 +550,11 @@ async function doHealthCheck() {
 /* ─── Page Init ──────────────────────────────────────────────────── */
 
 document.addEventListener('DOMContentLoaded', () => {
-    // Initialize global sync manager on every page
     SyncManager.init();
 
-    // Determine page and load data
     const path = window.location.pathname;
-    if (path === '/' || path === '') loadDashboard();
-    if (path === '/folders') loadSyncConfigs();
-    if (path === '/schedules') loadSchedules();
-    if (path === '/browser') loadFileBrowser();
-
-    // Refresh dashboard periodically
     if (path === '/' || path === '') {
+        loadDashboard();
         setInterval(loadDashboard, 30000);
     }
 });

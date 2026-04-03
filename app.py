@@ -17,7 +17,7 @@ from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from flask import Flask, Response, jsonify, render_template, request, send_file
+from flask import Flask, Response, jsonify, redirect, render_template, request, send_file
 from flask_socketio import SocketIO, emit as sio_emit
 
 # ─── Configuration ─────────────────────────────────────────────────────
@@ -213,7 +213,13 @@ active_syncs_lock = threading.Lock()
 
 
 def _parse_rclone_progress(line):
-    """Parse rclone stats output line to extract progress information."""
+    """Parse rclone stats output line to extract progress information.
+    
+    Handles multiple rclone output formats:
+    - Standard multi-line: "Transferred:   5.000 MiB / 23.000 MiB, 22%, 512 KiB/s, ETA 1m30s"
+    - One-line stats: "   43.751 KiB / 43.751 KiB, 100%, 43.749 KiB/s, ETA 0s"
+    - Compact stats: "Transferred:  5 / 23, 22%"
+    """
     progress = {}
 
     # Match: "Transferred:   5.000 MiB / 23.000 MiB, 22%, 512 KiB/s, ETA 1m30s"
@@ -231,6 +237,24 @@ def _parse_rclone_progress(line):
             progress["speed"] = xfer_match.group(4).strip()
         if xfer_match.group(5):
             progress["eta"] = xfer_match.group(5).strip()
+
+    # Match --stats-one-line compact output: "  43.751 KiB / 43.751 KiB, 100%, 43.749 KiB/s, ETA 0s"
+    # This format doesn't have "Transferred:" prefix
+    if not progress:
+        oneline_match = re.search(
+            r'^\s*([\d.]+\s*[KMGTP]?i?B)\s*/\s*([\d.]+\s*[KMGTP]?i?B),\s*(\d+)%'
+            r'(?:,\s*([\d.]+\s*[KMGTP]?i?B/s))?'
+            r'(?:,\s*ETA\s*([\w:]+))?',
+            line
+        )
+        if oneline_match:
+            progress["bytes_done"] = oneline_match.group(1).strip()
+            progress["bytes_total"] = oneline_match.group(2).strip()
+            progress["percent"] = int(oneline_match.group(3))
+            if oneline_match.group(4):
+                progress["speed"] = oneline_match.group(4).strip()
+            if oneline_match.group(5):
+                progress["eta"] = oneline_match.group(5).strip()
 
     # Match file count: "Transferred:            5 / 23, 22%"
     count_match = re.search(r'Transferred:\s+(\d+)\s*/\s*(\d+),\s*(\d+)%', line)
@@ -307,13 +331,23 @@ def _run_rclone_streaming(config_id, rclone_args):
     }
 
     def _append(line):
+        progress = _parse_rclone_progress(line)
         with active_syncs_lock:
             entry = active_syncs[config_id]
             entry["lines"].append(line)
             # Parse progress from stats lines
-            progress = _parse_rclone_progress(line)
             if progress:
                 entry["progress"].update(progress)
+        # Emit progress via WebSocket for real-time updates
+        if progress:
+            try:
+                socketio.emit("sync_progress", {
+                    "config_id": config_id,
+                    "name": job_name,
+                    "progress": progress,
+                }, namespace="/progress")
+            except Exception:
+                pass
         # Write to structured log file (no size limit)
         try:
             with open(log_file, "a") as f:
@@ -321,7 +355,6 @@ def _run_rclone_streaming(config_id, rclone_args):
                     "timestamp": datetime.now().isoformat(),
                     "line": line,
                 }
-                progress = _parse_rclone_progress(line)
                 if progress:
                     log_entry["progress"] = progress
                 f.write(json.dumps(log_entry) + "\n")
@@ -355,6 +388,12 @@ def _run_rclone_streaming(config_id, rclone_args):
         return rc, "\n".join(output_lines)
 
     _append(f"[{datetime.now().strftime('%H:%M:%S')}] Starting sync...")
+    try:
+        socketio.emit("sync_started", {
+            "config_id": config_id, "name": job_name,
+        }, namespace="/progress")
+    except Exception:
+        pass
     rc, output = _run(rclone_args)
 
     # Bisync first-run retry: if it failed asking for --resync, retry once
@@ -375,6 +414,14 @@ def _run_rclone_streaming(config_id, rclone_args):
         active_syncs[config_id]["success"] = success
         if success:
             active_syncs[config_id]["progress"]["percent"] = 100
+
+    try:
+        socketio.emit("sync_completed", {
+            "config_id": config_id, "name": job_name,
+            "success": success,
+        }, namespace="/progress")
+    except Exception:
+        pass
 
     # Finalize structured log
     try:
@@ -508,19 +555,26 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/sync-schedules")
+def sync_schedules_page():
+    return render_template("sync_schedules.html")
+
+
+# Legacy redirects for old URLs
 @app.route("/schedules")
 def schedules_page():
-    return render_template("schedules.html")
+    return redirect("/sync-schedules", code=301)
 
 
 @app.route("/folders")
 def folders_page():
-    return render_template("folders.html")
+    return redirect("/sync-schedules", code=301)
 
 
 @app.route("/browser")
 def browser_page():
-    return render_template("browser.html")
+    # File browser removed - redirect to dashboard
+    return redirect("/", code=301)
 
 
 @app.route("/connection")
@@ -528,9 +582,15 @@ def connection_page():
     return render_template("connection.html")
 
 
+@app.route("/all-settings")
+def all_settings_page():
+    return render_template("all_settings.html")
+
+
+# Legacy redirect
 @app.route("/settings")
 def settings_page():
-    return render_template("settings.html")
+    return redirect("/all-settings", code=301)
 
 
 @app.route("/logs")

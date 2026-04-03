@@ -6,8 +6,10 @@
 const ProgressManager = {
     socket: null,
     connected: false,
-    listeners: {},   // operation_id -> [callback, ...]
+    listeners: {},        // operation_id -> [callback, ...]
     globalListeners: [],  // callbacks for ALL events
+    syncListeners: [],    // callbacks for sync_progress events
+    _reconnectCount: 0,
 
     init() {
         if (this.socket) return;
@@ -15,18 +17,27 @@ const ProgressManager = {
             this.socket = io('/progress', {
                 transports: ['websocket', 'polling'],
                 reconnection: true,
-                reconnectionDelay: 1000,
-                reconnectionAttempts: 10,
+                reconnectionDelay: 500,
+                reconnectionDelayMax: 5000,
+                reconnectionAttempts: Infinity,
+                timeout: 10000,
             });
 
             this.socket.on('connect', () => {
                 this.connected = true;
-                console.log('[Progress] WebSocket connected');
+                this._reconnectCount = 0;
+                this._updateWsIndicator(true);
+                console.log('[WS] Connected');
             });
 
             this.socket.on('disconnect', () => {
                 this.connected = false;
-                console.log('[Progress] WebSocket disconnected');
+                this._updateWsIndicator(false);
+                console.log('[WS] Disconnected');
+            });
+
+            this.socket.on('reconnect_attempt', () => {
+                this._reconnectCount++;
             });
 
             // Progress events
@@ -35,13 +46,44 @@ const ProgressManager = {
             this.socket.on('operation_completed', (data) => this._dispatch('operation_completed', data));
             this.socket.on('operation_failed', (data) => this._dispatch('operation_failed', data));
             this.socket.on('migration_log', (data) => this._dispatch('migration_log', data));
+
+            // Sync-specific events (broadcast from _run_rclone_streaming)
+            this.socket.on('sync_progress', (data) => {
+                this.syncListeners.forEach(cb => {
+                    try { cb('sync_progress', data); } catch(e) { console.error(e); }
+                });
+                this._dispatch('sync_progress', data);
+            });
+            this.socket.on('sync_started', (data) => {
+                this.syncListeners.forEach(cb => {
+                    try { cb('sync_started', data); } catch(e) { console.error(e); }
+                });
+                this._dispatch('sync_started', data);
+            });
+            this.socket.on('sync_completed', (data) => {
+                this.syncListeners.forEach(cb => {
+                    try { cb('sync_completed', data); } catch(e) { console.error(e); }
+                });
+                this._dispatch('sync_completed', data);
+            });
         } catch (e) {
-            console.warn('[Progress] WebSocket init failed:', e);
+            console.warn('[WS] Init failed:', e);
+        }
+    },
+
+    _updateWsIndicator(connected) {
+        const dot = document.getElementById('ws-dot');
+        const label = document.getElementById('ws-label');
+        if (dot) {
+            dot.className = 'ws-dot' + (connected ? ' connected' : '');
+        }
+        if (label) {
+            label.textContent = connected ? 'Live' : 'Reconnecting...';
         }
     },
 
     _dispatch(event, data) {
-        const opId = data.operation_id || data.migration_id || '';
+        const opId = data.operation_id || data.migration_id || data.config_id || '';
 
         // Notify operation-specific listeners
         if (opId && this.listeners[opId]) {
@@ -61,8 +103,6 @@ const ProgressManager = {
             this.listeners[operationId] = [];
         }
         this.listeners[operationId].push(callback);
-
-        // Tell server to join room
         if (this.socket) {
             this.socket.emit('subscribe', { operation_id: operationId });
         }
@@ -73,6 +113,10 @@ const ProgressManager = {
         if (this.socket) {
             this.socket.emit('unsubscribe', { operation_id: operationId });
         }
+    },
+
+    onSync(callback) {
+        this.syncListeners.push(callback);
     },
 
     onAny(callback) {
@@ -91,7 +135,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
 /* ═══════════════════════════════════════════════════════════════════
    Progress Bar Component
-   Creates and manages progress bar UI elements.
    ═══════════════════════════════════════════════════════════════════ */
 
 function createProgressBar(containerId, options = {}) {
@@ -105,23 +148,23 @@ function createProgressBar(containerId, options = {}) {
 
     container.innerHTML = `
         <div class="progress-tracker" id="${id}">
-            <div class="progress-header">
-                <span class="progress-title">${options.title || 'Operation'}</span>
-                <span class="progress-status" id="${id}-status">Starting...</span>
+            <div class="progress-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+                <span class="progress-title" style="font-weight:600;font-size:13px">${options.title || 'Operation'}</span>
+                <span class="progress-status" id="${id}-status" style="font-size:12px;color:var(--text-muted)">Starting...</span>
             </div>
-            <div class="progress-bar-wrap">
-                <div class="progress-bar-bg">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+                <div class="progress-bar-container" style="flex:1">
                     <div class="progress-bar-fill" id="${id}-fill" style="width:0%"></div>
                 </div>
-                <span class="progress-pct" id="${id}-pct">0%</span>
+                <span class="progress-pct" id="${id}-pct" style="font-size:13px;font-weight:700;font-family:var(--font-mono);color:var(--proton-purple-light);min-width:40px;text-align:right">0%</span>
             </div>
-            <div class="progress-meta">
-                ${showElapsed ? `<span id="${id}-elapsed" class="progress-meta-item">⏱ 0s</span>` : ''}
-                ${showEta ? `<span id="${id}-eta" class="progress-meta-item">ETA: calculating...</span>` : ''}
-                ${showSpeed ? `<span id="${id}-speed" class="progress-meta-item">Speed: --</span>` : ''}
-                <span id="${id}-detail" class="progress-meta-item"></span>
+            <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--text-muted)">
+                ${showElapsed ? `<span id="${id}-elapsed">⏱ 0s</span>` : ''}
+                ${showEta ? `<span id="${id}-eta">ETA: calculating...</span>` : ''}
+                ${showSpeed ? `<span id="${id}-speed">Speed: --</span>` : ''}
+                <span id="${id}-detail"></span>
             </div>
-            <div class="progress-message" id="${id}-msg"></div>
+            <div id="${id}-msg" style="margin-top:6px;font-size:12px;color:var(--text-secondary)"></div>
         </div>
     `;
 
@@ -163,11 +206,10 @@ function createProgressBar(containerId, options = {}) {
                 }
             }
 
-            // Color the bar based on status
             if (fill) {
-                if (data.status === 'completed') fill.classList.add('completed');
-                else if (data.status === 'failed') fill.classList.add('failed');
-                else fill.classList.remove('completed', 'failed');
+                if (data.status === 'completed') fill.classList.add('complete');
+                else if (data.status === 'failed') fill.classList.add('error');
+                else fill.classList.remove('complete', 'error');
             }
         },
         destroy() {
@@ -179,6 +221,7 @@ function createProgressBar(containerId, options = {}) {
 function formatDuration(seconds) {
     if (seconds == null || seconds < 0) return '--';
     seconds = Math.round(seconds);
+    if (seconds === 0) return '0s';
     if (seconds < 60) return `${seconds}s`;
     const m = Math.floor(seconds / 60);
     const s = seconds % 60;
