@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 _SAFE_RCLONE_CMDS = frozenset({
     "version", "listremotes", "lsd", "lsjson", "about",
-    "config", "bisync", "sync", "check", "ls",
+    "config", "bisync", "sync", "check", "ls", "size", "link",
 })
 
 _SAFE_SCRIPTS = frozenset({"mount.sh", "unmount.sh", "health.sh"})
@@ -1091,7 +1091,316 @@ def api_compare_folders(config_id):
     })
 
 
-# ─── Routes: API — Schedules ──────────────────────────────────────────
+@app.route("/api/sync-configs/<config_id>/verify", methods=["POST"])
+def api_verify_sync(config_id):
+    """Deep sync verification using rclone check — confirms file integrity.
+
+    Inspired by Proton Drive SDK's revision tracking and hash verification.
+    Uses rclone check to compare checksums, not just file existence.
+    """
+    configs = load_json(SYNC_CONFIGS_FILE, [])
+    config = next((c for c in configs if c["id"] == config_id), None)
+    if not config:
+        return jsonify({"error": "Config not found"}), 404
+
+    env_config = load_config_env()
+    remote = env_config.get("RCLONE_REMOTE", "protondrive")
+    if not _validate_remote_name(remote):
+        return jsonify({"error": "Invalid remote name"}), 500
+    local_path = config.get("local_path", "")
+    remote_path = config.get("remote_path", "")
+    remote_full = f"{remote}:{remote_path}" if remote_path else f"{remote}:"
+
+    if not local_path or not os.path.isdir(local_path):
+        return jsonify({"error": "Local path does not exist"}), 400
+
+    # rclone check compares source vs dest by size and hash
+    success, stdout, stderr = run_rclone_cmd(
+        ["check", local_path, remote_full,
+         "--combined", "-",  # output combined report to stdout
+         "--checkers", str(env_config.get("SYNC_CHECKERS", "8"))],
+        timeout=300,
+    )
+
+    matched = []
+    mismatched = []
+    missing_src = []
+    missing_dst = []
+    errors = []
+
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # rclone check --combined format: "= file" (match), "* file" (differ),
+        # "+ file" (missing on src), "- file" (missing on dst), "! file" (error)
+        if len(line) >= 3:
+            marker = line[0]
+            filepath = line[2:]
+            if marker == "=":
+                matched.append(filepath)
+            elif marker == "*":
+                mismatched.append(filepath)
+            elif marker == "+":
+                missing_src.append(filepath)
+            elif marker == "-":
+                missing_dst.append(filepath)
+            elif marker == "!":
+                errors.append(filepath)
+
+    total = len(matched) + len(mismatched) + len(missing_src) + len(missing_dst)
+    integrity_pct = round((len(matched) / total * 100), 1) if total > 0 else 100.0
+
+    return jsonify({
+        "verified": success and len(mismatched) == 0 and len(errors) == 0,
+        "integrity_percent": integrity_pct,
+        "total_files": total,
+        "matched": len(matched),
+        "mismatched": mismatched[:100],
+        "mismatched_count": len(mismatched),
+        "missing_on_remote": missing_dst[:100],
+        "missing_on_remote_count": len(missing_dst),
+        "missing_on_local": missing_src[:100],
+        "missing_on_local_count": len(missing_src),
+        "errors": errors[:50],
+        "error_count": len(errors),
+    })
+
+
+@app.route("/api/browse/remote/metadata")
+def api_remote_metadata():
+    """Get enhanced file metadata from remote — MIME types, hashes, mod times.
+
+    Inspired by Proton Drive SDK's NodeEntity with full revision data.
+    Uses rclone lsjson with all metadata flags for richer file info.
+    """
+    path = request.args.get("path", "")
+    if not _validate_path_component(path):
+        return jsonify({"error": "Invalid remote path"}), 400
+
+    config = load_config_env()
+    remote = config.get("RCLONE_REMOTE", "protondrive")
+    if not _validate_remote_name(remote):
+        return jsonify({"error": "Invalid remote name"}), 500
+    remote_path = f"{remote}:{path}" if path else f"{remote}:"
+
+    # Full metadata: modtime + mimetype + hash + encrypted size
+    success, stdout, stderr = run_rclone_cmd(
+        ["lsjson", remote_path, "--hash", "--no-modtime"],
+        timeout=60,
+    )
+
+    if not success:
+        return jsonify({"error": stderr or "Failed to get metadata"}), 500
+
+    entries = []
+    try:
+        items = json.loads(stdout) if stdout.strip() else []
+        for item in sorted(items, key=lambda x: (not x.get("IsDir", False), x.get("Name", "").lower())):
+            entry = {
+                "name": item.get("Name", ""),
+                "path": os.path.join(path, item["Name"]) if path else item["Name"],
+                "is_dir": item.get("IsDir", False),
+                "size": item.get("Size", 0),
+                "mime_type": item.get("MimeType", ""),
+                "mod_time": item.get("ModTime", ""),
+                "encrypted": item.get("Encrypted", ""),
+                "hashes": item.get("Hashes", {}),
+                "id": item.get("ID", ""),
+            }
+            entries.append(entry)
+    except json.JSONDecodeError:
+        return jsonify({"error": "Failed to parse metadata"}), 500
+
+    return jsonify({"path": path or "/", "entries": entries})
+
+
+@app.route("/api/remotes/<name>/link", methods=["POST"])
+def api_create_share_link(name):
+    """Create a public share link for a file/folder on the remote.
+
+    Inspired by Proton Drive SDK's sharing API (shareNode, publicLinks).
+    Uses rclone link command which calls the provider's native share API.
+    """
+    if not _validate_remote_name(name):
+        return jsonify({"error": "Invalid remote name"}), 400
+
+    data = request.json or {}
+    file_path = data.get("path", "")
+    if not file_path or not _validate_path_component(file_path):
+        return jsonify({"error": "Invalid file path"}), 400
+
+    remote_path = f"{name}:{file_path}"
+    args = ["link", remote_path]
+
+    # Optional expiry (in seconds) if supported by the backend
+    expire = data.get("expire", "")
+    if expire:
+        args += ["--expire", str(expire)]
+
+    success, stdout, stderr = run_rclone_cmd(args, timeout=30)
+
+    if success and stdout.strip():
+        return jsonify({
+            "success": True,
+            "link": stdout.strip(),
+            "path": file_path,
+        })
+    return jsonify({
+        "success": False,
+        "error": stderr or "Failed to create share link. This provider may not support sharing.",
+    })
+
+
+@app.route("/api/sync-configs/<config_id>/health")
+def api_sync_health(config_id):
+    """Get sync health summary for a config — fast check without full verification.
+
+    Returns a quick assessment of sync state by comparing file counts and sizes.
+    Inspired by Proton Drive SDK's device sync tracking.
+    """
+    configs = load_json(SYNC_CONFIGS_FILE, [])
+    config = next((c for c in configs if c["id"] == config_id), None)
+    if not config:
+        return jsonify({"error": "Config not found"}), 404
+
+    env_config = load_config_env()
+    remote = env_config.get("RCLONE_REMOTE", "protondrive")
+    if not _validate_remote_name(remote):
+        return jsonify({"error": "Invalid remote name"}), 500
+    local_path = config.get("local_path", "")
+    remote_path = config.get("remote_path", "")
+    remote_full = f"{remote}:{remote_path}" if remote_path else f"{remote}:"
+
+    if not local_path or not os.path.isdir(local_path):
+        return jsonify({"status": "error", "message": "Local path missing"})
+
+    local_stats = _count_local_contents(local_path)
+
+    # Quick remote check — size only, no hashes
+    success, stdout, stderr = run_rclone_cmd(
+        ["size", remote_full, "--json"], timeout=30
+    )
+
+    remote_files = 0
+    remote_size = 0
+    if success and stdout.strip():
+        try:
+            size_data = json.loads(stdout)
+            remote_files = size_data.get("count", 0)
+            remote_size = size_data.get("bytes", 0)
+        except json.JSONDecodeError:
+            pass
+
+    # Assess health
+    file_diff = abs(local_stats["files"] - remote_files)
+    size_diff = abs(local_stats["total_size"] - remote_size)
+
+    if not success:
+        status = "unreachable"
+        message = "Cannot reach remote"
+    elif file_diff == 0 and size_diff < 1024:
+        status = "synced"
+        message = "Fully synchronized"
+    elif file_diff <= 3 and size_diff < 1024 * 1024:
+        status = "mostly_synced"
+        message = f"{file_diff} file(s) differ"
+    else:
+        status = "out_of_sync"
+        message = f"{file_diff} files and {size_diff} bytes differ"
+
+    # Get last sync time from history
+    last_sync = None
+    with sync_history_lock:
+        for entry in sync_history:
+            if entry.get("job_id") == config_id and entry.get("success"):
+                last_sync = entry.get("timestamp")
+                break
+
+    return jsonify({
+        "status": status,
+        "message": message,
+        "local_files": local_stats["files"],
+        "local_size": local_stats["total_size"],
+        "remote_files": remote_files,
+        "remote_size": remote_size,
+        "file_diff": file_diff,
+        "size_diff": size_diff,
+        "last_sync": last_sync,
+        "config_name": config.get("name", ""),
+    })
+
+
+@app.route("/api/sync-dashboard")
+def api_sync_dashboard():
+    """Aggregated sync health for all configs — powers the main dashboard.
+
+    Inspired by Proton Drive SDK's device registry and tree event scopes.
+    """
+    configs = load_json(SYNC_CONFIGS_FILE, [])
+    env_config = load_config_env()
+    remote = env_config.get("RCLONE_REMOTE", "protondrive")
+
+    results = []
+    for config in configs:
+        if not config.get("enabled", True):
+            results.append({
+                "id": config["id"],
+                "name": config.get("name", ""),
+                "status": "disabled",
+                "message": "Sync disabled",
+            })
+            continue
+
+        local_path = config.get("local_path", "")
+        if not local_path or not os.path.isdir(local_path):
+            results.append({
+                "id": config["id"],
+                "name": config.get("name", ""),
+                "status": "error",
+                "message": "Local path missing",
+            })
+            continue
+
+        local_stats = _count_local_contents(local_path)
+
+        # Find last sync from history
+        last_sync = None
+        last_success = None
+        with sync_history_lock:
+            for entry in sync_history:
+                if entry.get("job_id") == config["id"]:
+                    if last_sync is None:
+                        last_sync = entry.get("timestamp")
+                        last_success = entry.get("success")
+                    break
+
+        results.append({
+            "id": config["id"],
+            "name": config.get("name", ""),
+            "direction": config.get("direction", "bisync"),
+            "local_path": local_path,
+            "remote_path": config.get("remote_path", "/"),
+            "local_files": local_stats["files"],
+            "local_size": local_stats["total_size"],
+            "last_sync": last_sync,
+            "last_success": last_success,
+            "status": "active",
+            "message": "Ready",
+        })
+
+    # Active syncs overlay
+    with active_syncs_lock:
+        for r in results:
+            if r["id"] in active_syncs and not active_syncs[r["id"]].get("done", True):
+                r["status"] = "syncing"
+                r["message"] = "Sync in progress"
+
+    return jsonify({
+        "configs": results,
+        "total": len(results),
+        "active_syncs": sum(1 for r in results if r["status"] == "syncing"),
+    })
 
 
 @app.route("/api/schedules", methods=["GET"])

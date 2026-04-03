@@ -150,6 +150,7 @@ async function loadConfigs() {
                             <button class="btn btn-primary btn-xs" id="run-btn-${c.id}"
                                     onclick="runSyncWithProgress('${c.id}', '${escAttr(c.name)}')">▶ Sync</button>
                             <button class="btn btn-ghost btn-xs" onclick="compareFolder('${c.id}', '${escAttr(c.name)}')" title="Compare folders">📊 Compare</button>
+                            <button class="btn btn-ghost btn-xs" onclick="verifySync('${c.id}', this)" title="Verify integrity via checksums">🔏 Verify</button>
                             <button class="btn btn-ghost btn-xs" onclick="editConfig('${c.id}')">✏️</button>
                             <button class="btn btn-ghost btn-xs" style="color:var(--danger)" onclick="deleteConfig('${c.id}')">🗑</button>
                         </div>
@@ -289,6 +290,60 @@ function startPolling(configId, btn) {
             console.error('Poll error:', e);
         }
     }, 500);
+}
+
+/* ── Sync Integrity Verification (rclone check — inspired by Proton SDK revision hashes) ── */
+async function verifySync(configId, btn) {
+    const origText = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner" style="width:12px;height:12px;border-width:2px;display:inline-block"></span>';
+    showToast('Running integrity check (this may take a moment)...', 'info');
+
+    try {
+        const data = await api(`/sync-configs/${configId}/verify`, { method: 'POST' });
+        if (data.verified) {
+            showToast(`✓ Integrity verified: ${data.matched} files match (${data.integrity_percent}%)`, 'success');
+        } else {
+            let msg = `${data.mismatched_count} mismatched`;
+            if (data.missing_on_remote_count) msg += `, ${data.missing_on_remote_count} missing on remote`;
+            if (data.missing_on_local_count) msg += `, ${data.missing_on_local_count} missing locally`;
+            if (data.error_count) msg += `, ${data.error_count} errors`;
+            showToast(`Integrity: ${data.integrity_percent}% — ${msg}`, 'error');
+
+            // Show details in compare panel if available
+            const card = document.getElementById('compare-card');
+            const content = document.getElementById('compare-content');
+            if (card && content) {
+                document.getElementById('compare-title').textContent = `🔏 Integrity Report`;
+                let html = `<div style="margin-bottom:16px">
+                    <div class="progress-bar-container" style="margin-bottom:8px">
+                        <div class="progress-bar-fill" style="width:${data.integrity_percent}%;background:${data.integrity_percent > 95 ? 'var(--success)' : data.integrity_percent > 80 ? 'var(--warning)' : 'var(--danger)'}"></div>
+                    </div>
+                    <span style="font-size:14px;font-weight:600">${data.integrity_percent}% integrity</span>
+                    <span class="text-muted"> — ${data.matched} matched, ${data.total_files} total</span>
+                </div>`;
+                if (data.mismatched.length) {
+                    html += `<h4 style="color:var(--danger);margin:12px 0 8px">Mismatched Files (${data.mismatched_count})</h4>`;
+                    html += `<div class="log-output" style="max-height:200px">${data.mismatched.map(f => `<div class="log-line log-error">${escHtml(f)}</div>`).join('')}</div>`;
+                }
+                if (data.missing_on_remote.length) {
+                    html += `<h4 style="color:var(--warning);margin:12px 0 8px">Missing on Remote (${data.missing_on_remote_count})</h4>`;
+                    html += `<div class="log-output" style="max-height:200px">${data.missing_on_remote.map(f => `<div class="log-line log-warn">${escHtml(f)}</div>`).join('')}</div>`;
+                }
+                if (data.missing_on_local.length) {
+                    html += `<h4 style="color:var(--text-secondary);margin:12px 0 8px">Missing Locally (${data.missing_on_local_count})</h4>`;
+                    html += `<div class="log-output" style="max-height:200px">${data.missing_on_local.map(f => `<div class="log-line">${escHtml(f)}</div>`).join('')}</div>`;
+                }
+                content.innerHTML = html;
+                card.style.display = 'block';
+                card.scrollIntoView({ behavior: 'smooth' });
+            }
+        }
+    } catch (e) {
+        showToast('Verification failed: ' + e.message, 'error');
+    }
+    btn.disabled = false;
+    btn.innerHTML = origText;
 }
 
 /* ── Folder Comparison ── */
