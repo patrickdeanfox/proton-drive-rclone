@@ -118,27 +118,35 @@ def run_script(script_name, args=None, timeout=120):
 
 # ─── Sync Job History ─────────────────────────────────────────────────
 
-sync_history = []
-sync_history_lock = threading.Lock()
+HISTORY_FILE = WEBAPP_DATA / "sync_history.json"
 MAX_HISTORY = 100
+sync_history_lock = threading.Lock()
+
+# Load persisted history on startup
+try:
+    sync_history = load_json(HISTORY_FILE, [])
+except Exception:
+    sync_history = []
 
 
 def record_sync(job_id, job_name, success, message=""):
-    """Record a sync operation in history."""
+    """Record a sync operation in history and persist to disk."""
+    entry = {
+        "id": str(uuid.uuid4())[:8],
+        "job_id": job_id,
+        "job_name": job_name,
+        "timestamp": datetime.now().isoformat(),
+        "success": success,
+        "message": message[:500],
+    }
     with sync_history_lock:
-        sync_history.insert(
-            0,
-            {
-                "id": str(uuid.uuid4())[:8],
-                "job_id": job_id,
-                "job_name": job_name,
-                "timestamp": datetime.now().isoformat(),
-                "success": success,
-                "message": message[:500],
-            },
-        )
+        sync_history.insert(0, entry)
         if len(sync_history) > MAX_HISTORY:
             sync_history.pop()
+        try:
+            save_json(HISTORY_FILE, sync_history)
+        except Exception:
+            pass
 
 
 # ─── Live Sync Progress Tracking ──────────────────────────────────────
@@ -169,6 +177,9 @@ def _build_rclone_bisync_args(local_path, remote_full, env_config, resync=False)
 
     if resync:
         args.append("--resync")
+
+    # Emit transfer stats every second so the UI can show progress
+    args += ["--stats", "1s"]
 
     return args
 
@@ -277,11 +288,13 @@ def execute_sync_job(job_id):
     elif direction == "push":
         args = ["sync", local_path, remote_full,
                 "--log-level", env_config.get("LOG_LEVEL", "INFO"),
-                "--transfers", str(env_config.get("SYNC_TRANSFERS", "4"))]
+                "--transfers", str(env_config.get("SYNC_TRANSFERS", "4")),
+                "--stats", "1s"]
     else:  # pull
         args = ["sync", remote_full, local_path,
                 "--log-level", env_config.get("LOG_LEVEL", "INFO"),
-                "--transfers", str(env_config.get("SYNC_TRANSFERS", "4"))]
+                "--transfers", str(env_config.get("SYNC_TRANSFERS", "4")),
+                "--stats", "1s"]
 
     _run_rclone_streaming(job_id, args)
 
@@ -896,9 +909,14 @@ def api_list_remotes():
 
 @app.route("/api/remotes/<name>/test", methods=["POST"])
 def api_test_remote(name):
-    """Test connectivity to a remote."""
+    """Test connectivity to a remote.
+    Uses rclone's own --contimeout / --timeout so we get a clear error
+    message rather than a subprocess timeout killing it silently.
+    """
     success, _, stderr = run_rclone_cmd(
-        ["lsd", f"{name}:", "--max-depth", "0"], timeout=20
+        ["lsd", f"{name}:", "--max-depth", "0",
+         "--contimeout", "15s", "--timeout", "30s"],
+        timeout=60,
     )
     return jsonify({"success": success, "error": stderr if not success else ""})
 

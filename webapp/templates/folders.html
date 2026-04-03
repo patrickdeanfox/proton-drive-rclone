@@ -24,10 +24,35 @@
         <h3 id="progress-title">⏳ Syncing...</h3>
         <span id="progress-elapsed" class="text-muted" style="font-size:13px"></span>
     </div>
+    <!-- Transfer progress bar (populated from --stats 1s output) -->
+    <div id="progress-stats" style="display:none; margin-bottom:12px">
+        <div style="display:flex; justify-content:space-between; font-size:13px; color:var(--text-secondary); margin-bottom:6px">
+            <span id="stats-files"></span>
+            <span id="stats-speed"></span>
+            <span id="stats-eta"></span>
+        </div>
+        <div class="quota-bar" style="max-width:100%">
+            <div id="stats-bar" class="quota-bar-fill" style="width:0%;background:var(--accent);transition:width 0.5s ease"></div>
+        </div>
+    </div>
     <div id="progress-log" class="log-output"></div>
     <div id="progress-footer" style="margin-top:12px; display:flex; align-items:center; gap:12px">
         <span class="spinner" id="progress-spinner"></span>
         <span id="progress-status" style="font-size:13px; color:var(--text-secondary)">Running...</span>
+    </div>
+</div>
+
+<!-- Recent Sync Logs -->
+<div class="card" id="recent-logs-card">
+    <div class="card-header">
+        <h3>📋 Recent Sync Log</h3>
+        <div style="display:flex;gap:8px">
+            <button class="btn btn-ghost btn-sm" onclick="loadRecentLogs()">🔄 Refresh</button>
+            <a href="/logs" class="btn btn-ghost btn-sm">View Full Logs →</a>
+        </div>
+    </div>
+    <div id="recent-logs-output" class="log-output" style="height:200px">
+        <span class="text-muted">Loading...</span>
     </div>
 </div>
 
@@ -173,6 +198,11 @@ function startPolling(configId, btn) {
         document.getElementById('progress-elapsed').textContent =
             `${Math.floor(elapsed/60)}m ${elapsed%60}s`;
 
+        // Parse --stats 1s lines for the progress bar
+        if (data.lines) {
+            data.lines.forEach(line => updateStatsBar(line));
+        }
+
         if (!data.running) {
             clearInterval(pollTimer);
             const spinner = document.getElementById('progress-spinner');
@@ -184,6 +214,7 @@ function startPolling(configId, btn) {
             if (data.success) {
                 status.textContent = 'Completed successfully.';
                 status.style.color = 'var(--success)';
+                document.getElementById('stats-bar').style.width = '100%';
                 showToast('Sync completed successfully', 'success');
             } else {
                 status.textContent = 'Sync finished with errors. See output above.';
@@ -193,6 +224,7 @@ function startPolling(configId, btn) {
 
             if (btn) { btn.disabled = false; btn.textContent = '▶ Sync'; }
             activeSyncId = null;
+            loadRecentLogs();
         }
     }, 500);
 }
@@ -280,6 +312,49 @@ function renderTree(el, data, side) {
     el.innerHTML = html;
 }
 
+/* ── Stats bar (parses rclone --stats 1s output) ── */
+function updateStatsBar(line) {
+    // rclone stats line: "Transferred:   5 / 23, 22%, 512 B/s, ETA 1m30s"
+    const xferMatch = line.match(/Transferred:\s+([\d.]+\s+\S+)\s*\/\s*([\d.]+\s+\S+),\s*(\d+)%/);
+    if (xferMatch) {
+        const pct = parseInt(xferMatch[3], 10);
+        document.getElementById('stats-files').textContent = `${xferMatch[1]} / ${xferMatch[2]}`;
+        document.getElementById('stats-bar').style.width = pct + '%';
+        document.getElementById('progress-stats').style.display = 'block';
+    }
+    // Also try file-count variant: "Transferred:   5 / 23 files, 22%"
+    const countMatch = line.match(/Transferred:\s*(\d+)\s*\/\s*(\d+),\s*(\d+)%/);
+    if (countMatch) {
+        document.getElementById('stats-files').textContent =
+            `${countMatch[1]} / ${countMatch[2]} files transferred`;
+        document.getElementById('stats-bar').style.width = parseInt(countMatch[3], 10) + '%';
+        document.getElementById('progress-stats').style.display = 'block';
+    }
+    const speedMatch = line.match(/([\d.]+\s+(?:B|kB|MB|GB)\/s)/);
+    if (speedMatch) document.getElementById('stats-speed').textContent = speedMatch[1];
+    const etaMatch = line.match(/ETA\s+([\w:]+)/);
+    if (etaMatch && etaMatch[1] !== '-') document.getElementById('stats-eta').textContent = `ETA ${etaMatch[1]}`;
+}
+
+/* ── Recent logs (sync.log tail shown on the folders page) ── */
+async function loadRecentLogs() {
+    const el = document.getElementById('recent-logs-output');
+    const data = await api('/logs?lines=60');
+    if (!data.exists || !data.lines.length) {
+        el.innerHTML = '<span class="text-muted">No log entries yet. Run a sync first.</span>';
+        return;
+    }
+    el.innerHTML = data.lines.map(line => {
+        const l = line.toLowerCase();
+        let cls = 'log-line';
+        if (l.includes('error') || l.includes('✗') || l.includes('failed')) cls += ' log-error';
+        else if (l.includes('warn')) cls += ' log-warn';
+        else if (l.includes('✓') || l.includes('completed') || l.includes('success')) cls += ' log-success';
+        return `<div class="${cls}">${line.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`;
+    }).join('');
+    el.scrollTop = el.scrollHeight;
+}
+
 async function checkForRunningSyncs() {
     const configs = await api('/sync-configs');
     for (const c of configs) {
@@ -313,6 +388,9 @@ async function checkForRunningSyncs() {
     }
 }
 
-document.addEventListener('DOMContentLoaded', () => { loadConfigs().then(checkForRunningSyncs); });
+document.addEventListener('DOMContentLoaded', () => {
+    loadConfigs().then(checkForRunningSyncs);
+    loadRecentLogs();
+});
 </script>
 {% endblock %}
