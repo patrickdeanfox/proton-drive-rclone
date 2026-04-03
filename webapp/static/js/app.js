@@ -31,6 +31,14 @@ function formatRelative(iso) {
     } catch { return 'N/A'; }
 }
 
+function formatElapsed(ms) {
+    const secs = Math.floor(ms / 1000);
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+}
+
 function fileIcon(name, isDir) {
     if (isDir) return '📁';
     const ext = name.split('.').pop().toLowerCase();
@@ -44,6 +52,16 @@ function fileIcon(name, isDir) {
         sh: '⚙️', json: '📋', yml: '📋', yaml: '📋',
     };
     return map[ext] || '📄';
+}
+
+function escHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = s || '';
+    return d.innerHTML;
+}
+
+function escAttr(s) {
+    return (s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
 }
 
 /* ─── Toast Notifications ────────────────────────────────────────── */
@@ -88,6 +106,79 @@ document.addEventListener('click', e => {
 });
 
 /* ═══════════════════════════════════════════════════════════════════
+   Global Sync State Manager
+   Persists sync state across page changes using sessionStorage
+   and polls the server for active syncs on every page.
+   ═══════════════════════════════════════════════════════════════════ */
+
+const SyncManager = {
+    _pollTimer: null,
+    _activeSyncs: {},
+
+    init() {
+        // Start global sync status polling on every page
+        this.poll();
+        this._pollTimer = setInterval(() => this.poll(), 2000);
+
+        // Warn before leaving if syncs are running
+        window.addEventListener('beforeunload', (e) => {
+            const running = Object.values(this._activeSyncs).filter(s => s.running);
+            if (running.length > 0) {
+                e.preventDefault();
+                e.returnValue = 'A sync is currently running. Are you sure you want to leave?';
+            }
+        });
+    },
+
+    async poll() {
+        try {
+            const data = await api('/active-syncs');
+            this._activeSyncs = data;
+            this.updateGlobalIndicator(data);
+        } catch {
+            // Silently ignore poll failures
+        }
+    },
+
+    updateGlobalIndicator(syncs) {
+        const running = Object.entries(syncs).filter(([_, s]) => s.running);
+        const indicator = document.getElementById('global-sync-indicator');
+        if (!indicator) return;
+
+        if (running.length === 0) {
+            indicator.style.display = 'none';
+            return;
+        }
+
+        indicator.style.display = 'flex';
+        const [configId, syncInfo] = running[0];
+        const pct = syncInfo.progress?.percent || 0;
+        const name = syncInfo.name || 'Sync';
+
+        indicator.innerHTML = `
+            <div class="global-sync-icon"><span class="spinner" style="width:14px;height:14px;border-width:2px"></span></div>
+            <div class="global-sync-info">
+                <div class="global-sync-name">${escHtml(name)}</div>
+                <div class="global-sync-bar-wrap">
+                    <div class="global-sync-bar">
+                        <div class="global-sync-bar-fill" style="width:${pct}%"></div>
+                    </div>
+                    <span class="global-sync-pct">${pct}%</span>
+                </div>
+            </div>
+        `;
+    },
+
+    getActiveSyncs() {
+        return this._activeSyncs;
+    },
+
+    isRunning(configId) {
+        return this._activeSyncs[configId]?.running || false;
+    },
+};
+
+/* ═══════════════════════════════════════════════════════════════════
    Dashboard
    ═══════════════════════════════════════════════════════════════════ */
 
@@ -126,6 +217,11 @@ async function loadDashboard() {
                 <div class="stat-value">${status.active_schedules}</div>
                 <div class="stat-sub">automated sync jobs</div>
             </div>
+            <div class="stat-card">
+                <div class="stat-label">Running Syncs</div>
+                <div class="stat-value ${status.running_syncs > 0 ? 'success' : ''}">${status.running_syncs}</div>
+                <div class="stat-sub">active transfers</div>
+            </div>
         `;
     } catch (e) {
         statusEl.innerHTML = `<div class="stat-card"><div class="stat-value danger">Error loading status</div><div class="stat-sub">${e.message}</div></div>`;
@@ -152,7 +248,7 @@ async function loadDashboard() {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
-   Sync Configs (Folders)
+   Sync Configs (Folders) — used from folders.html inline script
    ═══════════════════════════════════════════════════════════════════ */
 
 let syncConfigs = [];
@@ -219,12 +315,6 @@ function directionLabel(d) {
     return { bisync: '⇄ Bisync', push: '→ Push', pull: '← Pull' }[d] || d;
 }
 
-function escHtml(s) {
-    const d = document.createElement('div');
-    d.textContent = s || '';
-    return d.innerHTML;
-}
-
 /* ─── Config Modal ───────────────────────────────────────────────── */
 
 let editingConfigId = null;
@@ -238,8 +328,8 @@ function openNewConfig() {
     document.getElementById('config-excludes').value = '';
     document.getElementById('config-modal-title').textContent = '📂 New Sync Configuration';
     openModal('config-modal');
-    loadLocalFolderPicker('');
-    loadRemoteFolderPicker('');
+    if (typeof loadLocalFolderPicker === 'function') loadLocalFolderPicker('');
+    if (typeof loadRemoteFolderPicker === 'function') loadRemoteFolderPicker('');
 }
 
 function editConfig(id) {
@@ -253,8 +343,8 @@ function editConfig(id) {
     document.getElementById('config-excludes').value = c.exclude_patterns || '';
     document.getElementById('config-modal-title').textContent = '✏️ Edit Sync Configuration';
     openModal('config-modal');
-    loadLocalFolderPicker(c.local_path);
-    loadRemoteFolderPicker(c.remote_path);
+    if (typeof loadLocalFolderPicker === 'function') loadLocalFolderPicker(c.local_path);
+    if (typeof loadRemoteFolderPicker === 'function') loadRemoteFolderPicker(c.remote_path);
 }
 
 async function saveConfig() {
@@ -300,7 +390,10 @@ async function deleteConfig(id) {
 async function runSync(id) {
     showToast('Sync started...', 'info');
     try {
-        await api(`/sync-configs/${id}/run`, { method: 'POST' });
+        const res = await api(`/sync-configs/${id}/run`, { method: 'POST' });
+        if (!res.success) {
+            showToast(res.message || 'Failed to start sync', 'error');
+        }
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
     }
@@ -355,10 +448,6 @@ async function loadRemoteFolderPicker(initialPath) {
         });
         el.innerHTML = html;
     } catch { el.innerHTML = '<div style="padding:12px;color:var(--text-muted)">Could not load remote folders (is rclone configured?)</div>'; }
-}
-
-function escAttr(s) {
-    return (s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -550,7 +639,6 @@ async function loadFileBrowser() {
     const remotePane = document.getElementById('remote-file-list');
     if (!localPane || !remotePane) return;
 
-    // Get default paths from config
     try {
         const config = await api('/config');
         if (!localBrowserPath) localBrowserPath = config.SYNC_DIR || '';
@@ -573,7 +661,6 @@ async function browseLocal(path) {
     try {
         const data = await api(`/browse/local?path=${encodeURIComponent(path)}`);
         if (data.error) {
-            // Fallback to home directory
             if (path && path !== '/home') {
                 browseLocal('/home');
                 return;
@@ -583,7 +670,6 @@ async function browseLocal(path) {
         }
         localBrowserPath = data.path;
 
-        // Breadcrumb
         if (crumbEl) {
             const parts = data.path.split('/').filter(Boolean);
             let crumbs = `<span class="crumb" onclick="browseLocal('/')">/</span>`;
@@ -596,7 +682,6 @@ async function browseLocal(path) {
             crumbEl.innerHTML = crumbs;
         }
 
-        // Entries
         let html = '';
         if (data.parent) {
             html += `<div class="file-entry dir" onclick="browseLocal('${escAttr(data.parent)}')">
@@ -639,7 +724,6 @@ async function browseRemote(path) {
         }
         remoteBrowserPath = data.path === '/' ? '' : data.path;
 
-        // Breadcrumb
         if (crumbEl) {
             const displayPath = data.path || '/';
             const parts = displayPath.split('/').filter(Boolean);
@@ -653,7 +737,6 @@ async function browseRemote(path) {
             crumbEl.innerHTML = crumbs;
         }
 
-        // Entries
         let html = '';
         if (data.parent !== null && data.parent !== undefined) {
             html += `<div class="file-entry dir" onclick="browseRemote('${escAttr(data.parent || '')}')">
@@ -705,6 +788,9 @@ async function doHealthCheck() {
 /* ─── Page Init ──────────────────────────────────────────────────── */
 
 document.addEventListener('DOMContentLoaded', () => {
+    // Initialize global sync manager on every page
+    SyncManager.init();
+
     // Determine page and load data
     const path = window.location.pathname;
     if (path === '/' || path === '') loadDashboard();

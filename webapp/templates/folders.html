@@ -24,21 +24,32 @@
         <h3 id="progress-title">⏳ Syncing...</h3>
         <span id="progress-elapsed" class="text-muted" style="font-size:13px"></span>
     </div>
-    <!-- Transfer progress bar (populated from --stats 1s output) -->
-    <div id="progress-stats" style="display:none; margin-bottom:12px">
+    <!-- Transfer progress bar -->
+    <div id="progress-stats" style="margin-bottom:12px">
         <div style="display:flex; justify-content:space-between; font-size:13px; color:var(--text-secondary); margin-bottom:6px">
-            <span id="stats-files"></span>
+            <span id="stats-files">Preparing...</span>
             <span id="stats-speed"></span>
             <span id="stats-eta"></span>
         </div>
-        <div class="quota-bar" style="max-width:100%">
-            <div id="stats-bar" class="quota-bar-fill" style="width:0%;background:var(--accent);transition:width 0.5s ease"></div>
+        <div class="progress-bar-container">
+            <div id="stats-bar" class="progress-bar-fill" style="width:0%"></div>
         </div>
+        <div id="stats-detail" style="margin-top:6px; font-size:12px; color:var(--text-muted)"></div>
     </div>
-    <div id="progress-log" class="log-output"></div>
+    <div id="progress-log" class="log-output" style="max-height:300px; overflow-y:auto"></div>
     <div id="progress-footer" style="margin-top:12px; display:flex; align-items:center; gap:12px">
         <span class="spinner" id="progress-spinner"></span>
         <span id="progress-status" style="font-size:13px; color:var(--text-secondary)">Running...</span>
+    </div>
+</div>
+
+<!-- Folder Comparison Panel -->
+<div class="card" id="compare-card" style="display:none">
+    <div class="card-header">
+        <h3 id="compare-title">📊 Folder Comparison</h3>
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('compare-card').style.display='none'">✕ Close</button>
+    </div>
+    <div id="compare-content">
     </div>
 </div>
 
@@ -112,10 +123,11 @@ let syncStartTime = null;
 let activeSyncId = null;
 const DIRECTION_LABELS = {bisync:'⇄ Bisync', push:'→ Push', pull:'← Pull'};
 
-/* ── Config list ── */
+/* ── Config list (overrides the generic one from app.js for this page) ── */
 async function loadConfigs() {
     const el = document.getElementById('sync-configs-list');
     const configs = await api('/sync-configs');
+    syncConfigs = configs;  // keep global in sync
     if (!configs.length) {
         el.innerHTML = '<p class="text-muted" style="padding:8px 0">No sync configurations yet. Click "+ New Config" to add one.</p>';
         return;
@@ -129,22 +141,26 @@ async function loadConfigs() {
             <tbody>
                 ${configs.map(c => `
                 <tr id="cfg-row-${c.id}">
-                    <td><strong>${c.name}</strong></td>
-                    <td class="mono" style="font-size:12px">${c.local_path || '—'}</td>
-                    <td class="mono" style="font-size:12px">${c.remote_path || '(root)'}</td>
+                    <td><strong>${escHtml(c.name)}</strong></td>
+                    <td class="mono" style="font-size:12px">${escHtml(c.local_path) || '—'}</td>
+                    <td class="mono" style="font-size:12px">${escHtml(c.remote_path) || '(root)'}</td>
                     <td>${DIRECTION_LABELS[c.direction] || c.direction}</td>
                     <td>
-                        <button class="btn btn-primary btn-xs" id="run-btn-${c.id}"
-                                onclick="runSync('${c.id}', '${c.name.replace(/'/g,"\\'")}')">▶ Sync</button>
-                        <button class="btn btn-ghost btn-xs" onclick="deleteConfig('${c.id}')">🗑</button>
+                        <div class="btn-group">
+                            <button class="btn btn-primary btn-xs" id="run-btn-${c.id}"
+                                    onclick="runSyncWithProgress('${c.id}', '${escAttr(c.name)}')">▶ Sync</button>
+                            <button class="btn btn-ghost btn-xs" onclick="compareFolder('${c.id}', '${escAttr(c.name)}')" title="Compare folders">📊 Compare</button>
+                            <button class="btn btn-ghost btn-xs" onclick="editConfig('${c.id}')">✏️</button>
+                            <button class="btn btn-ghost btn-xs" style="color:var(--danger)" onclick="deleteConfig('${c.id}')">🗑</button>
+                        </div>
                     </td>
                 </tr>`).join('')}
             </tbody>
         </table>`;
 }
 
-/* ── Run sync + show progress ── */
-async function runSync(configId, configName) {
+/* ── Run sync + show live progress ── */
+async function runSyncWithProgress(configId, configName) {
     const btn = document.getElementById(`run-btn-${configId}`);
     if (btn) { btn.disabled = true; btn.textContent = '⏳ Running...'; }
 
@@ -167,6 +183,11 @@ async function runSync(configId, configName) {
     document.getElementById('progress-spinner').style.display = '';
     document.getElementById('progress-status').textContent = 'Running...';
     document.getElementById('progress-status').style.color = 'var(--text-secondary)';
+    document.getElementById('stats-files').textContent = 'Preparing...';
+    document.getElementById('stats-speed').textContent = '';
+    document.getElementById('stats-eta').textContent = '';
+    document.getElementById('stats-bar').style.width = '0%';
+    document.getElementById('stats-detail').textContent = '';
     logEl.innerHTML = '';
     card.style.display = 'block';
     card.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -177,107 +198,216 @@ async function runSync(configId, configName) {
 function startPolling(configId, btn) {
     clearInterval(pollTimer);
     pollTimer = setInterval(async () => {
-        const data = await api(`/sync-configs/${configId}/status?since=${pollSince}`);
+        try {
+            const data = await api(`/sync-configs/${configId}/status?since=${pollSince}`);
 
-        // Append new lines
-        const logEl = document.getElementById('progress-log');
-        if (data.lines && data.lines.length) {
-            data.lines.forEach(line => {
-                const div = document.createElement('div');
-                div.className = 'log-line' + (line.includes('ERROR') || line.includes('✗') ? ' log-error'
-                              : line.includes('✓') || line.includes('completed') ? ' log-success' : '');
-                div.textContent = line;
-                logEl.appendChild(div);
-            });
-            logEl.scrollTop = logEl.scrollHeight;
-            pollSince = data.total;
-        }
+            // Append new lines to the live log
+            const logEl = document.getElementById('progress-log');
+            if (data.lines && data.lines.length) {
+                data.lines.forEach(line => {
+                    // Skip stats-one-line repeated output to keep log clean
+                    if (line.match(/^Transferred:|^Checks:|^Elapsed time:|^\s*$/)) return;
 
-        // Update elapsed
-        const elapsed = Math.floor((Date.now() - syncStartTime) / 1000);
-        document.getElementById('progress-elapsed').textContent =
-            `${Math.floor(elapsed/60)}m ${elapsed%60}s`;
-
-        // Parse --stats 1s lines for the progress bar
-        if (data.lines) {
-            data.lines.forEach(line => updateStatsBar(line));
-        }
-
-        if (!data.running) {
-            clearInterval(pollTimer);
-            const spinner = document.getElementById('progress-spinner');
-            const status = document.getElementById('progress-status');
-            spinner.style.display = 'none';
-            document.getElementById('progress-title').textContent =
-                data.success ? '✓ Sync complete' : '✗ Sync failed';
-
-            if (data.success) {
-                status.textContent = 'Completed successfully.';
-                status.style.color = 'var(--success)';
-                document.getElementById('stats-bar').style.width = '100%';
-                showToast('Sync completed successfully', 'success');
-            } else {
-                status.textContent = 'Sync finished with errors. See output above.';
-                status.style.color = 'var(--danger)';
-                showToast('Sync finished with errors', 'error');
+                    const div = document.createElement('div');
+                    div.className = 'log-line' +
+                        (line.includes('ERROR') || line.includes('✗') ? ' log-error'
+                        : line.includes('NOTICE') || line.includes('warn') ? ' log-warn'
+                        : line.includes('✓') || line.includes('completed') || line.includes('Sync completed') ? ' log-success' : '');
+                    div.textContent = line;
+                    logEl.appendChild(div);
+                });
+                logEl.scrollTop = logEl.scrollHeight;
+                pollSince = data.total;
             }
 
-            if (btn) { btn.disabled = false; btn.textContent = '▶ Sync'; }
-            activeSyncId = null;
-            loadRecentLogs();
+            // Update elapsed time
+            const elapsed = Date.now() - syncStartTime;
+            document.getElementById('progress-elapsed').textContent = formatElapsed(elapsed);
+
+            // Update progress bar from server-parsed progress
+            const p = data.progress || {};
+            if (p.percent !== undefined) {
+                document.getElementById('stats-bar').style.width = p.percent + '%';
+            }
+            if (p.bytes_done && p.bytes_total) {
+                document.getElementById('stats-files').textContent = `${p.bytes_done} / ${p.bytes_total}`;
+            } else if (p.files_done !== undefined && p.files_total !== undefined) {
+                document.getElementById('stats-files').textContent = `${p.files_done} / ${p.files_total} files`;
+            }
+            if (p.speed) {
+                document.getElementById('stats-speed').textContent = p.speed;
+            }
+            if (p.eta) {
+                document.getElementById('stats-eta').textContent = `ETA ${p.eta}`;
+            }
+            // Show current file being transferred
+            if (p.current_file) {
+                document.getElementById('stats-detail').textContent =
+                    `Transferring: ${p.current_file} (${p.current_file_percent || 0}%)`;
+            }
+            // Show checks info
+            if (p.checks_done !== undefined) {
+                const existing = document.getElementById('stats-detail').textContent;
+                const checksInfo = `Checks: ${p.checks_done}/${p.checks_total || '?'}`;
+                if (!existing.includes('Transferring')) {
+                    document.getElementById('stats-detail').textContent = checksInfo;
+                }
+            }
+            // Show errors count
+            if (p.errors && p.errors > 0) {
+                document.getElementById('stats-detail').textContent += ` | ⚠ ${p.errors} error(s)`;
+            }
+
+            // Handle sync completion
+            if (!data.running) {
+                clearInterval(pollTimer);
+                const spinner = document.getElementById('progress-spinner');
+                const status = document.getElementById('progress-status');
+                spinner.style.display = 'none';
+                document.getElementById('progress-title').textContent =
+                    data.success ? '✓ Sync complete' : '✗ Sync failed';
+
+                if (data.success) {
+                    status.textContent = `Completed successfully in ${formatElapsed(elapsed)}.`;
+                    status.style.color = 'var(--success)';
+                    document.getElementById('stats-bar').style.width = '100%';
+                    document.getElementById('stats-bar').classList.add('complete');
+                    showToast('Sync completed successfully', 'success');
+                } else {
+                    status.textContent = 'Sync finished with errors. See output above.';
+                    status.style.color = 'var(--danger)';
+                    document.getElementById('stats-bar').classList.add('error');
+                    showToast('Sync finished with errors', 'error');
+                }
+
+                if (btn) { btn.disabled = false; btn.textContent = '▶ Sync'; }
+                activeSyncId = null;
+                loadRecentLogs();
+            }
+        } catch (e) {
+            // Don't stop polling on transient errors
+            console.error('Poll error:', e);
         }
     }, 500);
 }
 
-/* ── Config modal ── */
-let editingConfigId = null;
+/* ── Folder Comparison ── */
+async function compareFolder(configId, configName) {
+    const card = document.getElementById('compare-card');
+    const content = document.getElementById('compare-content');
+    document.getElementById('compare-title').textContent = `📊 Comparing: ${configName}`;
+    content.innerHTML = '<div class="loading-overlay"><span class="spinner"></span> Scanning folders... this may take a moment for large directories.</div>';
+    card.style.display = 'block';
+    card.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
-function openNewConfig() {
-    editingConfigId = null;
-    document.getElementById('config-modal-title').textContent = '📂 New Sync Configuration';
-    ['config-name','config-local-path','config-remote-path','config-excludes'].forEach(id => {
-        document.getElementById(id).value = '';
-    });
-    document.getElementById('config-direction').value = 'bisync';
-    openModal('config-modal');
-    loadLocalTree(document.getElementById('config-local-path').value || document.getElementById('config-local-path').placeholder);
-    loadRemoteTree('');
-}
+    try {
+        const data = await api(`/sync-configs/${configId}/compare`, { method: 'POST' });
+        if (data.error) {
+            content.innerHTML = `<div class="alert alert-danger">${escHtml(data.error)}</div>`;
+            return;
+        }
 
-async function saveConfig() {
-    const body = {
-        name: document.getElementById('config-name').value.trim(),
-        local_path: document.getElementById('config-local-path').value.trim(),
-        remote_path: document.getElementById('config-remote-path').value.trim(),
-        direction: document.getElementById('config-direction').value,
-        exclude_patterns: document.getElementById('config-excludes').value.trim(),
-    };
-    if (!body.name || !body.local_path) {
-        showToast('Name and local path are required', 'error');
-        return;
+        const localStats = data.local;
+        const remoteStats = data.remote;
+
+        let html = `
+            <div class="compare-grid">
+                <div class="compare-side">
+                    <h4>💻 Local: <code>${escHtml(data.local_path)}</code></h4>
+                    <div class="compare-stats">
+                        <div class="compare-stat">
+                            <span class="compare-stat-value">${localStats.folders.toLocaleString()}</span>
+                            <span class="compare-stat-label">Folders</span>
+                        </div>
+                        <div class="compare-stat">
+                            <span class="compare-stat-value">${localStats.files.toLocaleString()}</span>
+                            <span class="compare-stat-label">Files</span>
+                        </div>
+                        <div class="compare-stat">
+                            <span class="compare-stat-value">${formatSize(localStats.total_size)}</span>
+                            <span class="compare-stat-label">Total Size</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="compare-vs">⇄</div>
+                <div class="compare-side">
+                    <h4>☁️ Remote: <code>${escHtml(data.remote_path)}</code></h4>
+                    <div class="compare-stats">
+                        <div class="compare-stat">
+                            <span class="compare-stat-value">${remoteStats.folders.toLocaleString()}</span>
+                            <span class="compare-stat-label">Folders</span>
+                        </div>
+                        <div class="compare-stat">
+                            <span class="compare-stat-value">${remoteStats.files.toLocaleString()}</span>
+                            <span class="compare-stat-label">Files</span>
+                        </div>
+                        <div class="compare-stat">
+                            <span class="compare-stat-value">${formatSize(remoteStats.total_size)}</span>
+                            <span class="compare-stat-label">Total Size</span>
+                        </div>
+                    </div>
+                </div>
+            </div>`;
+
+        if (data.in_sync) {
+            html += `<div class="compare-result success">
+                <span>✓</span> Folders are in sync! All files match.
+            </div>`;
+        } else {
+            html += `<div class="compare-result warning">`;
+
+            if (data.missing_on_remote_count > 0) {
+                html += `<div class="compare-diff">
+                    <h5>📤 ${data.missing_on_remote_count} file(s) missing on remote (exist locally only):</h5>
+                    <div class="compare-file-list">
+                        ${data.missing_on_remote.slice(0, 20).map(f => `<div class="compare-file">📄 ${escHtml(f)}</div>`).join('')}
+                        ${data.missing_on_remote_count > 20 ? `<div class="compare-file text-muted">...and ${data.missing_on_remote_count - 20} more</div>` : ''}
+                    </div>
+                </div>`;
+            }
+
+            if (data.missing_on_local_count > 0) {
+                html += `<div class="compare-diff">
+                    <h5>📥 ${data.missing_on_local_count} file(s) missing locally (exist on remote only):</h5>
+                    <div class="compare-file-list">
+                        ${data.missing_on_local.slice(0, 20).map(f => `<div class="compare-file">📄 ${escHtml(f)}</div>`).join('')}
+                        ${data.missing_on_local_count > 20 ? `<div class="compare-file text-muted">...and ${data.missing_on_local_count - 20} more</div>` : ''}
+                    </div>
+                </div>`;
+            }
+
+            html += `</div>
+                <div style="margin-top:16px; display:flex; gap:10px; align-items:center">
+                    <button class="btn btn-primary" onclick="confirmAndSync('${configId}', '${escAttr(configName)}', ${data.missing_on_remote_count}, ${data.missing_on_local_count})">
+                        🔄 Sync Missing Files
+                    </button>
+                    <span class="text-muted" style="font-size:13px">This will run a full sync to resolve differences.</span>
+                </div>`;
+        }
+
+        content.innerHTML = html;
+    } catch (e) {
+        content.innerHTML = `<div class="alert alert-danger">Error comparing folders: ${escHtml(e.message)}</div>`;
     }
-    const method = editingConfigId ? 'PUT' : 'POST';
-    const url = editingConfigId ? `/sync-configs/${editingConfigId}` : '/sync-configs';
-    const res = await api(url, { method, body });
-    if (res.id || res.success) {
-        showToast(editingConfigId ? 'Config updated' : 'Config created', 'success');
-        closeModal('config-modal');
-        loadConfigs();
-    } else {
-        showToast(res.error || 'Failed to save', 'error');
+}
+
+function confirmAndSync(configId, configName, missingRemote, missingLocal) {
+    const total = missingRemote + missingLocal;
+    const msg = `This will sync ${total} missing file(s):\n` +
+        (missingRemote > 0 ? `• ${missingRemote} file(s) will be uploaded to remote\n` : '') +
+        (missingLocal > 0 ? `• ${missingLocal} file(s) will be downloaded from remote\n` : '') +
+        `\nProceed with sync?`;
+
+    if (confirm(msg)) {
+        document.getElementById('compare-card').style.display = 'none';
+        runSyncWithProgress(configId, configName);
     }
 }
 
-async function deleteConfig(configId) {
-    if (!confirm('Delete this sync configuration?')) return;
-    await api(`/sync-configs/${configId}`, { method: 'DELETE' });
-    showToast('Config deleted', 'info');
-    loadConfigs();
-}
-
-/* ── Folder trees in modal ── */
+/* ── Folder tree helpers (local to folders page) ── */
 async function loadLocalTree(path) {
     const el = document.getElementById('local-folder-tree');
+    if (!el) return;
     el.innerHTML = '<span class="spinner" style="display:inline-block;width:14px;height:14px;border-width:2px"></span>';
     const data = await api(`/browse/local/tree?path=${encodeURIComponent(path || '')}`);
     renderTree(el, data, 'local');
@@ -285,25 +415,26 @@ async function loadLocalTree(path) {
 
 async function loadRemoteTree(path) {
     const el = document.getElementById('remote-folder-tree');
+    if (!el) return;
     el.innerHTML = '<span class="spinner" style="display:inline-block;width:14px;height:14px;border-width:2px"></span>';
     const data = await api(`/browse/remote/tree?path=${encodeURIComponent(path || '')}`);
     renderTree(el, data, 'remote');
 }
 
 function renderTree(el, data, side) {
-    if (data.error) { el.innerHTML = `<span class="text-muted">${data.error}</span>`; return; }
+    if (data.error) { el.innerHTML = `<span class="text-muted">${escHtml(data.error)}</span>`; return; }
     const inputId = side === 'local' ? 'config-local-path' : 'config-remote-path';
     let html = '';
     if (data.parent !== null && data.parent !== undefined) {
-        html += `<div class="tree-item tree-up" onclick="${side === 'local' ? `loadLocalTree('${data.parent}')` : `loadRemoteTree('${data.parent}')`}">
+        html += `<div class="tree-item tree-up" onclick="${side === 'local' ? `loadLocalTree('${escAttr(data.parent)}')` : `loadRemoteTree('${escAttr(data.parent)}')`}">
                     ↑ ..
                  </div>`;
     }
     (data.dirs || []).forEach(d => {
-        html += `<div class="tree-item" onclick="${side === 'local' ? `loadLocalTree('${d.path}')` : `loadRemoteTree('${d.path}')`}">
-                    📁 ${d.name}
+        html += `<div class="tree-item" onclick="${side === 'local' ? `loadLocalTree('${escAttr(d.path)}')` : `loadRemoteTree('${escAttr(d.path)}')`}">
+                    📁 ${escHtml(d.name)}
                     <button class="btn btn-ghost btn-xs tree-select-btn"
-                            onclick="event.stopPropagation(); document.getElementById('${inputId}').value='${d.path}'">
+                            onclick="event.stopPropagation(); document.getElementById('${inputId}').value='${escAttr(d.path)}'">
                         Select
                     </button>
                  </div>`;
@@ -312,33 +443,10 @@ function renderTree(el, data, side) {
     el.innerHTML = html;
 }
 
-/* ── Stats bar (parses rclone --stats 1s output) ── */
-function updateStatsBar(line) {
-    // rclone stats line: "Transferred:   5 / 23, 22%, 512 B/s, ETA 1m30s"
-    const xferMatch = line.match(/Transferred:\s+([\d.]+\s+\S+)\s*\/\s*([\d.]+\s+\S+),\s*(\d+)%/);
-    if (xferMatch) {
-        const pct = parseInt(xferMatch[3], 10);
-        document.getElementById('stats-files').textContent = `${xferMatch[1]} / ${xferMatch[2]}`;
-        document.getElementById('stats-bar').style.width = pct + '%';
-        document.getElementById('progress-stats').style.display = 'block';
-    }
-    // Also try file-count variant: "Transferred:   5 / 23 files, 22%"
-    const countMatch = line.match(/Transferred:\s*(\d+)\s*\/\s*(\d+),\s*(\d+)%/);
-    if (countMatch) {
-        document.getElementById('stats-files').textContent =
-            `${countMatch[1]} / ${countMatch[2]} files transferred`;
-        document.getElementById('stats-bar').style.width = parseInt(countMatch[3], 10) + '%';
-        document.getElementById('progress-stats').style.display = 'block';
-    }
-    const speedMatch = line.match(/([\d.]+\s+(?:B|kB|MB|GB)\/s)/);
-    if (speedMatch) document.getElementById('stats-speed').textContent = speedMatch[1];
-    const etaMatch = line.match(/ETA\s+([\w:]+)/);
-    if (etaMatch && etaMatch[1] !== '-') document.getElementById('stats-eta').textContent = `ETA ${etaMatch[1]}`;
-}
-
 /* ── Recent logs (sync.log tail shown on the folders page) ── */
 async function loadRecentLogs() {
     const el = document.getElementById('recent-logs-output');
+    if (!el) return;
     const data = await api('/logs?lines=60');
     if (!data.exists || !data.lines.length) {
         el.innerHTML = '<span class="text-muted">No log entries yet. Run a sync first.</span>';
@@ -355,6 +463,7 @@ async function loadRecentLogs() {
     el.scrollTop = el.scrollHeight;
 }
 
+/* ── Check for running syncs on page load ── */
 async function checkForRunningSyncs() {
     const configs = await api('/sync-configs');
     for (const c of configs) {
@@ -365,29 +474,46 @@ async function checkForRunningSyncs() {
             if (btn) { btn.disabled = true; btn.textContent = '⏳ Running...'; }
 
             activeSyncId = c.id;
-            pollSince = status.total;  // skip already-buffered lines and show from now
+            pollSince = 0;  // Show all buffered lines
             syncStartTime = status.started_at ? new Date(status.started_at).getTime() : Date.now();
 
             const card = document.getElementById('progress-card');
             const logEl = document.getElementById('progress-log');
             document.getElementById('progress-title').textContent = `⏳ Syncing: ${c.name}`;
             document.getElementById('progress-spinner').style.display = '';
-            document.getElementById('progress-status').textContent = 'Sync in progress (started before this page loaded)...';
-            // Show buffered output so far
-            status.lines.forEach(line => {
-                const div = document.createElement('div');
-                div.className = 'log-line' + (line.includes('ERROR') || line.includes('✗') ? ' log-error'
-                              : line.includes('✓') || line.includes('completed') ? ' log-success' : '');
-                div.textContent = line;
-                logEl.appendChild(div);
-            });
+            document.getElementById('progress-status').textContent = 'Sync in progress (reconnected)...';
+
+            // Show all buffered output
+            if (status.lines) {
+                status.lines.forEach(line => {
+                    if (line.match(/^Transferred:|^Checks:|^Elapsed time:|^\s*$/)) return;
+                    const div = document.createElement('div');
+                    div.className = 'log-line' + (line.includes('ERROR') || line.includes('✗') ? ' log-error'
+                                  : line.includes('✓') || line.includes('completed') ? ' log-success' : '');
+                    div.textContent = line;
+                    logEl.appendChild(div);
+                });
+                logEl.scrollTop = logEl.scrollHeight;
+                pollSince = status.total;
+            }
+
+            // Update progress bar
+            const p = status.progress || {};
+            if (p.percent !== undefined) {
+                document.getElementById('stats-bar').style.width = p.percent + '%';
+            }
+            if (p.bytes_done && p.bytes_total) {
+                document.getElementById('stats-files').textContent = `${p.bytes_done} / ${p.bytes_total}`;
+            }
+
             card.style.display = 'block';
             startPolling(c.id, btn);
-            break;  // only one sync can run per config at a time
+            break;
         }
     }
 }
 
+/* ── Page init ── */
 document.addEventListener('DOMContentLoaded', () => {
     loadConfigs().then(checkForRunningSyncs);
     loadRecentLogs();

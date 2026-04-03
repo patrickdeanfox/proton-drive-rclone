@@ -5,10 +5,47 @@
 {% block content %}
 <div class="page-header">
     <h2>Logs</h2>
-    <p>View rclone sync activity and operation history.</p>
+    <p>View rclone sync activity, download logs for analysis, and manage log storage.</p>
 </div>
 
-<!-- Controls -->
+<!-- Live Sync Output (shown when a sync is running) -->
+<div class="card" id="live-sync-card" style="display:none">
+    <div class="card-header">
+        <h3>🔴 Live Sync Output</h3>
+        <div style="display:flex; gap:8px; align-items:center">
+            <span id="live-sync-name" class="badge badge-accent"></span>
+            <span id="live-sync-elapsed" class="text-muted" style="font-size:12px"></span>
+        </div>
+    </div>
+    <div style="margin-bottom:12px">
+        <div style="display:flex; justify-content:space-between; font-size:13px; color:var(--text-secondary); margin-bottom:6px">
+            <span id="live-stats-info">Waiting for data...</span>
+            <span id="live-stats-speed"></span>
+        </div>
+        <div class="progress-bar-container">
+            <div id="live-stats-bar" class="progress-bar-fill" style="width:0%"></div>
+        </div>
+    </div>
+    <div id="live-sync-log" class="log-output" style="height:300px; overflow-y:auto"></div>
+</div>
+
+<!-- Sync Operation Logs (structured per-operation logs) -->
+<div class="card">
+    <div class="card-header">
+        <h3>📦 Sync Operation Logs</h3>
+        <div style="display:flex;gap:8px;align-items:center">
+            <button class="btn btn-ghost btn-sm" onclick="loadSyncLogs()">🔄 Refresh</button>
+            <a href="/api/sync-logs/download-all" class="btn btn-ghost btn-sm" download>📥 Download All (JSON)</a>
+            <button class="btn btn-ghost btn-sm" onclick="openModal('cleanup-modal')" style="color:var(--warning)">🧹 Cleanup</button>
+        </div>
+    </div>
+    <div id="sync-logs-stats" style="margin-bottom:12px; font-size:13px; color:var(--text-secondary)"></div>
+    <div id="sync-logs-list">
+        <div class="loading-overlay"><span class="spinner"></span></div>
+    </div>
+</div>
+
+<!-- sync.log (traditional log file) -->
 <div class="card">
     <div class="card-header">
         <h3>📋 sync.log</h3>
@@ -39,13 +76,61 @@
         <div class="loading-overlay"><span class="spinner"></span></div>
     </div>
 </div>
+
+<!-- Log Cleanup Modal -->
+<div id="cleanup-modal" class="modal-overlay">
+    <div class="modal">
+        <h3>🧹 Cleanup Sync Logs</h3>
+        <p style="color:var(--text-secondary); margin-bottom:16px">
+            Remove old sync operation logs to free up disk space. Logs are stored with no size limit,
+            so periodic cleanup is recommended.
+        </p>
+
+        <div id="cleanup-stats" style="margin-bottom:16px"></div>
+
+        <div class="form-group">
+            <label>Cleanup Mode</label>
+            <select id="cleanup-mode" onchange="updateCleanupPreview()">
+                <option value="older_than">Delete logs older than...</option>
+                <option value="all">Delete all logs</option>
+            </select>
+        </div>
+
+        <div class="form-group" id="cleanup-days-group">
+            <label>Older than (days)</label>
+            <input type="number" id="cleanup-days" value="30" min="1" max="365">
+        </div>
+
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeModal('cleanup-modal')">Cancel</button>
+            <button class="btn btn-danger" onclick="doCleanup()">🗑 Delete Logs</button>
+        </div>
+    </div>
+</div>
+
+<!-- Log Viewer Modal -->
+<div id="logview-modal" class="modal-overlay">
+    <div class="modal" style="max-width:800px;max-height:90vh">
+        <h3 id="logview-title">📋 Log Details</h3>
+        <div id="logview-meta" style="margin-bottom:12px"></div>
+        <div id="logview-content" class="log-output" style="height:400px;overflow-y:auto"></div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeModal('logview-modal')">Close</button>
+            <a id="logview-download-json" class="btn btn-primary btn-sm" href="#" download>📥 JSON</a>
+            <a id="logview-download-text" class="btn btn-ghost btn-sm" href="#" download>📥 Text</a>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
 let autoRefreshTimer = null;
 let autoRefreshOn = false;
+let liveSyncPollTimer = null;
+let liveSyncSince = {};
 
+/* ── sync.log viewer ── */
 async function loadLogs() {
     const lines = document.getElementById('lines-select').value;
     const el = document.getElementById('log-output');
@@ -70,6 +155,7 @@ async function loadLogs() {
     el.scrollTop = el.scrollHeight;
 }
 
+/* ── Sync history ── */
 async function loadHistory() {
     const el = document.getElementById('history-output');
     const data = await api('/sync-history');
@@ -84,7 +170,7 @@ async function loadHistory() {
                 ${data.map(h => `
                 <tr>
                     <td class="mono" style="font-size:12px;white-space:nowrap">${formatDate(h.timestamp)}</td>
-                    <td>${h.job_name}</td>
+                    <td>${escapeHtml(h.job_name)}</td>
                     <td>${h.success
                         ? '<span class="badge badge-success">OK</span>'
                         : '<span class="badge badge-danger">Failed</span>'}</td>
@@ -95,6 +181,140 @@ async function loadHistory() {
         </table>`;
 }
 
+/* ── Structured sync logs list ── */
+async function loadSyncLogs() {
+    const el = document.getElementById('sync-logs-list');
+    const statsEl = document.getElementById('sync-logs-stats');
+
+    // Load stats
+    try {
+        const stats = await api('/sync-logs/stats');
+        statsEl.innerHTML = `
+            <span>📊 ${stats.total_files} log file(s) · ${formatSize(stats.total_size)} total</span>
+            ${stats.oldest ? `<span style="margin-left:16px">📅 Oldest: ${formatDate(stats.oldest)}</span>` : ''}
+        `;
+    } catch {}
+
+    // Load log list
+    try {
+        const logs = await api('/sync-logs');
+        if (!logs.length) {
+            el.innerHTML = '<p class="text-muted" style="padding:12px 0">No sync operation logs yet. Logs are created automatically when you run a sync.</p>';
+            return;
+        }
+
+        el.innerHTML = `
+            <table class="data-table">
+                <thead><tr>
+                    <th>Config</th><th>Started</th><th>Status</th>
+                    <th>Lines</th><th>Size</th><th>Actions</th>
+                </tr></thead>
+                <tbody>
+                    ${logs.map(l => `
+                    <tr>
+                        <td><strong>${escapeHtml(l.config_name)}</strong></td>
+                        <td class="mono" style="font-size:12px">${formatDate(l.started_at || l.modified)}</td>
+                        <td>${l.success === true ? '<span class="badge badge-success">OK</span>'
+                            : l.success === false ? '<span class="badge badge-danger">Failed</span>'
+                            : '<span class="badge badge-warning">Running</span>'}</td>
+                        <td>${l.line_count || '—'}</td>
+                        <td class="mono" style="font-size:12px">${formatSize(l.size)}</td>
+                        <td>
+                            <div class="btn-group">
+                                <button class="btn btn-ghost btn-xs" onclick="viewSyncLog('${escAttr(l.filename)}')" title="View">👁</button>
+                                <a class="btn btn-ghost btn-xs" href="/api/sync-logs/${encodeURIComponent(l.filename)}/download?format=json" download title="Download JSON">📥 JSON</a>
+                                <a class="btn btn-ghost btn-xs" href="/api/sync-logs/${encodeURIComponent(l.filename)}/download?format=text" download title="Download Text">📥 TXT</a>
+                                <button class="btn btn-ghost btn-xs" style="color:var(--danger)" onclick="deleteSyncLog('${escAttr(l.filename)}')" title="Delete">🗑</button>
+                            </div>
+                        </td>
+                    </tr>`).join('')}
+                </tbody>
+            </table>`;
+    } catch (e) {
+        el.innerHTML = `<p class="text-muted">Error loading logs: ${escapeHtml(e.message)}</p>`;
+    }
+}
+
+/* ── View sync log ── */
+async function viewSyncLog(filename) {
+    document.getElementById('logview-title').textContent = `📋 ${filename}`;
+    document.getElementById('logview-content').innerHTML = '<div class="loading-overlay"><span class="spinner"></span></div>';
+    document.getElementById('logview-meta').innerHTML = '';
+    document.getElementById('logview-download-json').href = `/api/sync-logs/${encodeURIComponent(filename)}/download?format=json`;
+    document.getElementById('logview-download-text').href = `/api/sync-logs/${encodeURIComponent(filename)}/download?format=text`;
+    openModal('logview-modal');
+
+    try {
+        const data = await api(`/sync-logs/${encodeURIComponent(filename)}`);
+
+        if (data.meta) {
+            const m = data.meta;
+            document.getElementById('logview-meta').innerHTML = `
+                <div style="display:flex; gap:16px; flex-wrap:wrap; font-size:13px; color:var(--text-secondary)">
+                    <span>📁 ${escapeHtml(m.config_name || '')}</span>
+                    <span>🕐 ${formatDate(m.started_at)}</span>
+                    <span>${m.success ? '✅ Success' : '❌ Failed'}</span>
+                    <span>📝 ${m.line_count || data.lines.length} lines</span>
+                </div>`;
+        }
+
+        const content = document.getElementById('logview-content');
+        content.innerHTML = data.lines.map(entry => {
+            const line = entry.line || '';
+            let cls = 'log-line';
+            const l = line.toLowerCase();
+            if (l.includes('error') || l.includes('✗')) cls += ' log-error';
+            else if (l.includes('warn') || l.includes('notice')) cls += ' log-warn';
+            else if (l.includes('completed') || l.includes('success')) cls += ' log-success';
+
+            const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : '';
+            return `<div class="${cls}"><span class="text-muted" style="font-size:11px">${ts}</span> ${escapeHtml(line)}</div>`;
+        }).join('');
+        content.scrollTop = content.scrollHeight;
+    } catch (e) {
+        document.getElementById('logview-content').innerHTML = `<p class="text-muted">Error: ${escapeHtml(e.message)}</p>`;
+    }
+}
+
+/* ── Delete sync log ── */
+async function deleteSyncLog(filename) {
+    if (!confirm(`Delete log: ${filename}?`)) return;
+    await api(`/sync-logs/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+    showToast('Log deleted', 'info');
+    loadSyncLogs();
+}
+
+/* ── Cleanup modal ── */
+function updateCleanupPreview() {
+    const mode = document.getElementById('cleanup-mode').value;
+    document.getElementById('cleanup-days-group').style.display = mode === 'older_than' ? '' : 'none';
+}
+
+async function doCleanup() {
+    const mode = document.getElementById('cleanup-mode').value;
+    const days = parseInt(document.getElementById('cleanup-days').value) || 30;
+
+    const msg = mode === 'all'
+        ? 'Delete ALL sync operation logs? This cannot be undone.'
+        : `Delete logs older than ${days} days?`;
+
+    if (!confirm(msg)) return;
+
+    const res = await api('/sync-logs/cleanup', {
+        method: 'POST',
+        body: { mode, days }
+    });
+
+    if (res.success) {
+        showToast(`Deleted ${res.deleted} log file(s)`, 'success');
+        closeModal('cleanup-modal');
+        loadSyncLogs();
+    } else {
+        showToast('Cleanup failed: ' + (res.error || 'Unknown error'), 'error');
+    }
+}
+
+/* ── Auto-refresh ── */
 function toggleAutoRefresh() {
     const btn = document.getElementById('auto-refresh-btn');
     autoRefreshOn = !autoRefreshOn;
@@ -118,12 +338,106 @@ async function clearLogs() {
     loadLogs();
 }
 
+/* ── Live sync output on this page ── */
+async function checkAndShowLiveSyncs() {
+    try {
+        const syncs = await api('/active-syncs');
+        const running = Object.entries(syncs).filter(([_, s]) => s.running);
+        const card = document.getElementById('live-sync-card');
+
+        if (running.length === 0) {
+            card.style.display = 'none';
+            clearInterval(liveSyncPollTimer);
+            return;
+        }
+
+        card.style.display = 'block';
+        const [configId, syncInfo] = running[0];
+
+        document.getElementById('live-sync-name').textContent = syncInfo.name || configId;
+
+        // Start polling for live log lines
+        if (!liveSyncSince[configId]) liveSyncSince[configId] = 0;
+
+        clearInterval(liveSyncPollTimer);
+        liveSyncPollTimer = setInterval(async () => {
+            try {
+                const data = await api(`/sync-configs/${configId}/status?since=${liveSyncSince[configId]}`);
+                const logEl = document.getElementById('live-sync-log');
+
+                if (data.lines && data.lines.length) {
+                    data.lines.forEach(line => {
+                        if (line.match(/^Transferred:|^Checks:|^Elapsed time:|^\s*$/)) return;
+                        const div = document.createElement('div');
+                        div.className = 'log-line' +
+                            (line.includes('ERROR') ? ' log-error'
+                            : line.includes('warn') || line.includes('NOTICE') ? ' log-warn'
+                            : line.includes('completed') ? ' log-success' : '');
+                        div.textContent = line;
+                        logEl.appendChild(div);
+                    });
+                    logEl.scrollTop = logEl.scrollHeight;
+                    liveSyncSince[configId] = data.total;
+                }
+
+                // Progress
+                const p = data.progress || {};
+                if (p.percent !== undefined) {
+                    document.getElementById('live-stats-bar').style.width = p.percent + '%';
+                }
+                if (p.bytes_done && p.bytes_total) {
+                    document.getElementById('live-stats-info').textContent = `${p.bytes_done} / ${p.bytes_total} (${p.percent || 0}%)`;
+                }
+                if (p.speed) {
+                    document.getElementById('live-stats-speed').textContent = p.speed;
+                }
+
+                if (data.started_at) {
+                    const elapsed = Date.now() - new Date(data.started_at).getTime();
+                    document.getElementById('live-sync-elapsed').textContent = formatElapsed(elapsed);
+                }
+
+                if (!data.running) {
+                    clearInterval(liveSyncPollTimer);
+                    document.getElementById('live-sync-name').textContent += data.success ? ' ✅' : ' ❌';
+                    loadSyncLogs();  // Refresh logs list
+                    loadLogs();      // Refresh sync.log
+                }
+            } catch {}
+        }, 500);
+    } catch {}
+}
+
 function escapeHtml(str) {
     return String(str)
         .replace(/&/g,'&amp;').replace(/</g,'&lt;')
         .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-document.addEventListener('DOMContentLoaded', () => { loadLogs(); loadHistory(); });
+/* ── Page init ── */
+document.addEventListener('DOMContentLoaded', () => {
+    loadLogs();
+    loadHistory();
+    loadSyncLogs();
+    checkAndShowLiveSyncs();
+
+    // Also load cleanup stats when modal opens
+    const cleanupModal = document.getElementById('cleanup-modal');
+    if (cleanupModal) {
+        const observer = new MutationObserver(() => {
+            if (cleanupModal.classList.contains('active')) {
+                api('/sync-logs/stats').then(stats => {
+                    document.getElementById('cleanup-stats').innerHTML = `
+                        <div style="display:flex; gap:16px; padding:12px; background:var(--bg-input); border-radius:var(--radius-sm); font-size:13px">
+                            <span>📁 ${stats.total_files} log files</span>
+                            <span>💾 ${formatSize(stats.total_size)}</span>
+                            ${stats.oldest ? `<span>📅 Oldest: ${formatDate(stats.oldest)}</span>` : ''}
+                        </div>`;
+                }).catch(() => {});
+            }
+        });
+        observer.observe(cleanupModal, { attributes: true, attributeFilter: ['class'] });
+    }
+});
 </script>
 {% endblock %}

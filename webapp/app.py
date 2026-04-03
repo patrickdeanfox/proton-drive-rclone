@@ -17,7 +17,7 @@ from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, send_file
 
 # ─── Configuration ─────────────────────────────────────────────────────
 
@@ -30,10 +30,12 @@ WEBAPP_DATA = DATA_DIR / "webapp"
 SCHEDULES_FILE = WEBAPP_DATA / "schedules.json"
 SYNC_CONFIGS_FILE = WEBAPP_DATA / "sync_configs.json"
 LOG_DIR = DATA_DIR / "logs"
+SYNC_LOGS_DIR = WEBAPP_DATA / "sync_logs"  # Per-operation structured logs
 
 # Ensure directories exist
 WEBAPP_DATA.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+SYNC_LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__)
 scheduler = BackgroundScheduler(daemon=True)
@@ -151,8 +153,55 @@ def record_sync(job_id, job_name, success, message=""):
 
 # ─── Live Sync Progress Tracking ──────────────────────────────────────
 
-active_syncs = {}          # config_id → {lines, done, success, started_at}
+active_syncs = {}          # config_id → {lines, done, success, started_at, progress}
 active_syncs_lock = threading.Lock()
+
+
+def _parse_rclone_progress(line):
+    """Parse rclone stats output line to extract progress information."""
+    progress = {}
+
+    # Match: "Transferred:   5.000 MiB / 23.000 MiB, 22%, 512 KiB/s, ETA 1m30s"
+    xfer_match = re.search(
+        r'Transferred:\s+([\d.]+\s*\S+)\s*/\s*([\d.]+\s*\S+),\s*(\d+)%'
+        r'(?:,\s*([\d.]+\s*\S+/s))?'
+        r'(?:,\s*ETA\s+([\w:]+))?',
+        line
+    )
+    if xfer_match:
+        progress["bytes_done"] = xfer_match.group(1).strip()
+        progress["bytes_total"] = xfer_match.group(2).strip()
+        progress["percent"] = int(xfer_match.group(3))
+        if xfer_match.group(4):
+            progress["speed"] = xfer_match.group(4).strip()
+        if xfer_match.group(5):
+            progress["eta"] = xfer_match.group(5).strip()
+
+    # Match file count: "Transferred:            5 / 23, 22%"
+    count_match = re.search(r'Transferred:\s+(\d+)\s*/\s*(\d+),\s*(\d+)%', line)
+    if count_match and "bytes_done" not in progress:
+        progress["files_done"] = int(count_match.group(1))
+        progress["files_total"] = int(count_match.group(2))
+        progress["percent"] = int(count_match.group(3))
+
+    # Match: "Checks:   5 / 23, 22%"
+    checks_match = re.search(r'Checks:\s+(\d+)\s*/\s*(\d+),?\s*(\d+)?%?', line)
+    if checks_match:
+        progress["checks_done"] = int(checks_match.group(1))
+        progress["checks_total"] = int(checks_match.group(2))
+
+    # Match: "Errors:                 3"
+    err_match = re.search(r'Errors:\s+(\d+)', line)
+    if err_match:
+        progress["errors"] = int(err_match.group(1))
+
+    # Match individual file transfer: " *  filename.txt:  22% /1.234MiB, 100KiB/s, 0s"
+    file_match = re.search(r'\*\s+(.+?):\s+(\d+)%\s*/\s*([\d.]+\s*\S+)', line)
+    if file_match:
+        progress["current_file"] = file_match.group(1).strip()
+        progress["current_file_percent"] = int(file_match.group(2))
+
+    return progress if progress else None
 
 
 def _build_rclone_bisync_args(local_path, remote_full, env_config, resync=False):
@@ -179,7 +228,7 @@ def _build_rclone_bisync_args(local_path, remote_full, env_config, resync=False)
         args.append("--resync")
 
     # Emit transfer stats every second so the UI can show progress
-    args += ["--stats", "1s"]
+    args += ["--stats", "1s", "--stats-one-line"]
 
     return args
 
@@ -191,9 +240,38 @@ def _run_rclone_streaming(config_id, rclone_args):
     config = next((c for c in configs if c["id"] == config_id), None)
     job_name = config.get("name", config_id) if config else config_id
 
+    # Create structured log file for this operation
+    log_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + config_id
+    log_file = SYNC_LOGS_DIR / f"{log_id}.jsonl"
+    log_meta = {
+        "log_id": log_id,
+        "config_id": config_id,
+        "config_name": job_name,
+        "started_at": datetime.now().isoformat(),
+        "command": ["rclone"] + rclone_args,
+    }
+
     def _append(line):
         with active_syncs_lock:
-            active_syncs[config_id]["lines"].append(line)
+            entry = active_syncs[config_id]
+            entry["lines"].append(line)
+            # Parse progress from stats lines
+            progress = _parse_rclone_progress(line)
+            if progress:
+                entry["progress"].update(progress)
+        # Write to structured log file (no size limit)
+        try:
+            with open(log_file, "a") as f:
+                log_entry = {
+                    "timestamp": datetime.now().isoformat(),
+                    "line": line,
+                }
+                progress = _parse_rclone_progress(line)
+                if progress:
+                    log_entry["progress"] = progress
+                f.write(json.dumps(log_entry) + "\n")
+        except Exception:
+            pass
 
     def _run(args):
         rc = 0
@@ -240,6 +318,19 @@ def _run_rclone_streaming(config_id, rclone_args):
     with active_syncs_lock:
         active_syncs[config_id]["done"] = True
         active_syncs[config_id]["success"] = success
+        if success:
+            active_syncs[config_id]["progress"]["percent"] = 100
+
+    # Finalize structured log
+    try:
+        log_meta["finished_at"] = datetime.now().isoformat()
+        log_meta["success"] = success
+        log_meta["exit_code"] = rc
+        log_meta["line_count"] = len(active_syncs[config_id]["lines"])
+        with open(log_file, "a") as f:
+            f.write(json.dumps({"_meta": log_meta}) + "\n")
+    except Exception:
+        pass
 
     record_sync(config_id, job_name, success, output[-500:] if output else "")
 
@@ -265,17 +356,19 @@ def execute_sync_job(job_id):
     remote_full = f"{remote}:{remote_path}" if remote_path else f"{remote}:"
 
     # Slot may already be reserved by api_run_sync; only init if not present
-    # (scheduler-triggered jobs won't have a pre-reserved slot)
     with active_syncs_lock:
         if job_id not in active_syncs or active_syncs[job_id].get("done", True):
             active_syncs[job_id] = {
                 "lines": [], "done": False, "success": None,
                 "started_at": datetime.now().isoformat(),
                 "name": config.get("name", job_id),
+                "progress": {},
+                "direction": direction,
+                "local_path": local_path,
+                "remote_path": remote_path,
             }
 
     if direction == "bisync":
-        # First-run detection: check bisync state dir for this remote
         state_dir = Path.home() / ".cache" / "rclone" / "bisync"
         needs_resync = False
         if not state_dir.exists():
@@ -289,12 +382,12 @@ def execute_sync_job(job_id):
         args = ["sync", local_path, remote_full,
                 "--log-level", env_config.get("LOG_LEVEL", "INFO"),
                 "--transfers", str(env_config.get("SYNC_TRANSFERS", "4")),
-                "--stats", "1s"]
+                "--stats", "1s", "--stats-one-line"]
     else:  # pull
         args = ["sync", remote_full, local_path,
                 "--log-level", env_config.get("LOG_LEVEL", "INFO"),
                 "--transfers", str(env_config.get("SYNC_TRANSFERS", "4")),
-                "--stats", "1s"]
+                "--stats", "1s", "--stats-one-line"]
 
     _run_rclone_streaming(job_id, args)
 
@@ -442,6 +535,10 @@ def api_status():
     # Active schedules
     active_schedules = len(scheduler.get_jobs())
 
+    # Active syncs count
+    with active_syncs_lock:
+        running_syncs = sum(1 for s in active_syncs.values() if not s.get("done", True))
+
     return jsonify(
         {
             "rclone_installed": rclone_ok,
@@ -454,9 +551,33 @@ def api_status():
             "local_files": local_files,
             "local_size": local_size,
             "active_schedules": active_schedules,
+            "running_syncs": running_syncs,
             "config": config,
         }
     )
+
+
+# ─── Routes: API — Active Syncs (global) ──────────────────────────────
+
+
+@app.route("/api/active-syncs")
+def api_active_syncs():
+    """Return summary of all active/recent syncs. Used by all pages to show global sync status."""
+    with active_syncs_lock:
+        result = {}
+        for cid, info in active_syncs.items():
+            result[cid] = {
+                "running": not info["done"],
+                "success": info["success"],
+                "started_at": info.get("started_at"),
+                "name": info.get("name", cid),
+                "progress": info.get("progress", {}),
+                "line_count": len(info["lines"]),
+                "direction": info.get("direction", ""),
+                "local_path": info.get("local_path", ""),
+                "remote_path": info.get("remote_path", ""),
+            }
+    return jsonify(result)
 
 
 # ─── Routes: API — Sync Configs ───────────────────────────────────────
@@ -544,6 +665,10 @@ def api_run_sync(config_id):
             "lines": [], "done": False, "success": None,
             "started_at": datetime.now().isoformat(),
             "name": config.get("name", config_id),
+            "progress": {},
+            "direction": config.get("direction", "bisync"),
+            "local_path": config.get("local_path", ""),
+            "remote_path": config.get("remote_path", ""),
         }
 
     thread = threading.Thread(target=execute_sync_job, args=(config_id,), daemon=True)
@@ -557,7 +682,7 @@ def api_sync_status(config_id):
     since = int(request.args.get("since", 0))
     with active_syncs_lock:
         if config_id not in active_syncs:
-            return jsonify({"running": False, "lines": [], "total": 0, "success": None})
+            return jsonify({"running": False, "lines": [], "total": 0, "success": None, "progress": {}})
         info = active_syncs[config_id]
         return jsonify({
             "running": not info["done"],
@@ -566,7 +691,132 @@ def api_sync_status(config_id):
             "success": info["success"],
             "started_at": info.get("started_at"),
             "name": info.get("name", config_id),
+            "progress": info.get("progress", {}),
         })
+
+
+# ─── Routes: API — Folder Comparison ──────────────────────────────────
+
+
+def _count_local_contents(path):
+    """Count folders and files in a local directory."""
+    folders = 0
+    files = 0
+    total_size = 0
+    try:
+        for entry in Path(path).rglob("*"):
+            if entry.is_dir():
+                folders += 1
+            elif entry.is_file():
+                files += 1
+                try:
+                    total_size += entry.stat().st_size
+                except OSError:
+                    pass
+    except (PermissionError, OSError):
+        pass
+    return {"folders": folders, "files": files, "total_size": total_size}
+
+
+def _count_remote_contents(remote_path):
+    """Count folders and files on remote using rclone lsjson --recursive."""
+    folders = 0
+    files = 0
+    total_size = 0
+    success, stdout, stderr = run_rclone_cmd(
+        ["lsjson", remote_path, "--recursive", "--no-modtime", "--no-mimetype"],
+        timeout=120,
+    )
+    if success and stdout.strip():
+        try:
+            items = json.loads(stdout)
+            for item in items:
+                if item.get("IsDir", False):
+                    folders += 1
+                else:
+                    files += 1
+                    total_size += item.get("Size", 0)
+        except json.JSONDecodeError:
+            pass
+    return {"folders": folders, "files": files, "total_size": total_size, "rclone_ok": success, "error": stderr if not success else ""}
+
+
+def _list_local_files(path):
+    """Get set of relative file paths for a local directory."""
+    result = set()
+    base = Path(path)
+    try:
+        for entry in base.rglob("*"):
+            if entry.is_file():
+                result.add(str(entry.relative_to(base)))
+    except (PermissionError, OSError):
+        pass
+    return result
+
+
+def _list_remote_files(remote_path):
+    """Get set of relative file paths on remote."""
+    result = set()
+    success, stdout, _ = run_rclone_cmd(
+        ["lsjson", remote_path, "--recursive", "--no-modtime", "--no-mimetype", "--files-only"],
+        timeout=120,
+    )
+    if success and stdout.strip():
+        try:
+            items = json.loads(stdout)
+            for item in items:
+                result.add(item.get("Path", item.get("Name", "")))
+        except json.JSONDecodeError:
+            pass
+    return result
+
+
+@app.route("/api/sync-configs/<config_id>/compare", methods=["POST"])
+def api_compare_folders(config_id):
+    """Compare local and remote folder contents for a sync config."""
+    configs = load_json(SYNC_CONFIGS_FILE, [])
+    config = next((c for c in configs if c["id"] == config_id), None)
+    if not config:
+        return jsonify({"error": "Config not found"}), 404
+
+    env_config = load_config_env()
+    remote = env_config.get("RCLONE_REMOTE", "protondrive")
+    local_path = config.get("local_path", "")
+    remote_path = config.get("remote_path", "")
+    remote_full = f"{remote}:{remote_path}" if remote_path else f"{remote}:"
+
+    if not local_path or not os.path.isdir(local_path):
+        return jsonify({"error": f"Local path does not exist: {local_path}"}), 400
+
+    # Count contents
+    local_stats = _count_local_contents(local_path)
+    remote_stats = _count_remote_contents(remote_full)
+
+    if not remote_stats.get("rclone_ok", True):
+        return jsonify({
+            "error": f"Could not list remote: {remote_stats.get('error', 'Unknown error')}",
+            "local": local_stats,
+        }), 500
+
+    # Find differences
+    local_files = _list_local_files(local_path)
+    remote_files = _list_remote_files(remote_full)
+
+    missing_on_remote = sorted(local_files - remote_files)
+    missing_on_local = sorted(remote_files - local_files)
+
+    return jsonify({
+        "config_name": config.get("name", ""),
+        "local_path": local_path,
+        "remote_path": remote_path or "/",
+        "local": local_stats,
+        "remote": {k: v for k, v in remote_stats.items() if k not in ("rclone_ok", "error")},
+        "missing_on_remote": missing_on_remote[:500],  # Cap for large dirs
+        "missing_on_remote_count": len(missing_on_remote),
+        "missing_on_local": missing_on_local[:500],
+        "missing_on_local_count": len(missing_on_local),
+        "in_sync": len(missing_on_remote) == 0 and len(missing_on_local) == 0,
+    })
 
 
 # ─── Routes: API — Schedules ──────────────────────────────────────────
@@ -909,10 +1159,7 @@ def api_list_remotes():
 
 @app.route("/api/remotes/<name>/test", methods=["POST"])
 def api_test_remote(name):
-    """Test connectivity to a remote.
-    Uses rclone's own --contimeout / --timeout so we get a clear error
-    message rather than a subprocess timeout killing it silently.
-    """
+    """Test connectivity to a remote."""
     success, _, stderr = run_rclone_cmd(
         ["lsd", f"{name}:", "--max-depth", "0",
          "--contimeout", "15s", "--timeout", "30s"],
@@ -1007,6 +1254,244 @@ def api_clear_logs():
     if log_file.exists():
         log_file.write_text("")
     return jsonify({"success": True})
+
+
+# ─── Routes: API — Structured Sync Logs (per-operation) ───────────────
+
+
+@app.route("/api/sync-logs")
+def api_list_sync_logs():
+    """List all structured sync log files with metadata."""
+    logs = []
+    try:
+        for f in sorted(SYNC_LOGS_DIR.glob("*.jsonl"), reverse=True):
+            stat = f.stat()
+            # Read last line for metadata
+            meta = {}
+            try:
+                with open(f, "rb") as fh:
+                    # Seek to end and read last line
+                    fh.seek(0, 2)
+                    size = fh.tell()
+                    if size > 0:
+                        # Read last 4KB to find last line
+                        fh.seek(max(0, size - 4096))
+                        last_lines = fh.read().decode("utf-8", errors="replace").strip().split("\n")
+                        if last_lines:
+                            last = json.loads(last_lines[-1])
+                            if "_meta" in last:
+                                meta = last["_meta"]
+            except Exception:
+                pass
+
+            logs.append({
+                "filename": f.name,
+                "size": stat.st_size,
+                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                "config_name": meta.get("config_name", f.stem),
+                "started_at": meta.get("started_at", ""),
+                "finished_at": meta.get("finished_at", ""),
+                "success": meta.get("success"),
+                "line_count": meta.get("line_count", 0),
+            })
+    except Exception:
+        pass
+    return jsonify(logs)
+
+
+@app.route("/api/sync-logs/<filename>")
+def api_get_sync_log(filename):
+    """Get contents of a specific sync log file."""
+    log_file = SYNC_LOGS_DIR / filename
+    if not log_file.exists():
+        return jsonify({"error": "Log not found"}), 404
+
+    lines = []
+    meta = {}
+    try:
+        with open(log_file) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    entry = json.loads(line)
+                    if "_meta" in entry:
+                        meta = entry["_meta"]
+                    else:
+                        lines.append(entry)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({"lines": lines, "meta": meta, "filename": filename})
+
+
+@app.route("/api/sync-logs/<filename>/download")
+def api_download_sync_log(filename):
+    """Download a sync log file. Supports format=json (default) or format=jsonl or format=text."""
+    log_file = SYNC_LOGS_DIR / filename
+    if not log_file.exists():
+        return jsonify({"error": "Log not found"}), 404
+
+    fmt = request.args.get("format", "json")
+
+    if fmt == "jsonl":
+        # Return raw JSONL file
+        return send_file(
+            log_file,
+            mimetype="application/x-ndjson",
+            as_attachment=True,
+            download_name=filename,
+        )
+
+    # Parse the log
+    lines = []
+    meta = {}
+    try:
+        with open(log_file) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    entry = json.loads(line)
+                    if "_meta" in entry:
+                        meta = entry["_meta"]
+                    else:
+                        lines.append(entry)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    if fmt == "text":
+        # Structured text format ideal for LLM ingestion
+        text_lines = []
+        text_lines.append(f"=== Sync Operation Log ===")
+        text_lines.append(f"Config: {meta.get('config_name', 'unknown')}")
+        text_lines.append(f"Config ID: {meta.get('config_id', 'unknown')}")
+        text_lines.append(f"Started: {meta.get('started_at', 'unknown')}")
+        text_lines.append(f"Finished: {meta.get('finished_at', 'unknown')}")
+        text_lines.append(f"Success: {meta.get('success', 'unknown')}")
+        text_lines.append(f"Exit Code: {meta.get('exit_code', 'unknown')}")
+        text_lines.append(f"Command: {' '.join(meta.get('command', []))}")
+        text_lines.append(f"Total Lines: {meta.get('line_count', len(lines))}")
+        text_lines.append("=" * 40)
+        text_lines.append("")
+        for entry in lines:
+            ts = entry.get("timestamp", "")
+            line_text = entry.get("line", "")
+            progress = entry.get("progress", {})
+            prefix = f"[{ts}] " if ts else ""
+            text_lines.append(f"{prefix}{line_text}")
+            if progress:
+                text_lines.append(f"  >> Progress: {json.dumps(progress)}")
+
+        content = "\n".join(text_lines)
+        return Response(
+            content,
+            mimetype="text/plain",
+            headers={"Content-Disposition": f"attachment; filename={filename.replace('.jsonl', '.txt')}"},
+        )
+
+    # Default: JSON format (best for LLM ingestion - structured and parseable)
+    result = {
+        "metadata": meta,
+        "entries": lines,
+        "summary": {
+            "total_lines": len(lines),
+            "has_errors": any("ERROR" in e.get("line", "") for e in lines),
+            "progress_snapshots": [e for e in lines if e.get("progress")],
+        },
+    }
+    return Response(
+        json.dumps(result, indent=2),
+        mimetype="application/json",
+        headers={"Content-Disposition": f"attachment; filename={filename.replace('.jsonl', '.json')}"},
+    )
+
+
+@app.route("/api/sync-logs/download-all")
+def api_download_all_logs():
+    """Download all sync logs as a single JSON file."""
+    all_logs = []
+    try:
+        for f in sorted(SYNC_LOGS_DIR.glob("*.jsonl")):
+            lines = []
+            meta = {}
+            with open(f) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        entry = json.loads(line)
+                        if "_meta" in entry:
+                            meta = entry["_meta"]
+                        else:
+                            lines.append(entry)
+            all_logs.append({"metadata": meta, "entries": lines, "filename": f.name})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    return Response(
+        json.dumps({"sync_logs": all_logs, "exported_at": datetime.now().isoformat()}, indent=2),
+        mimetype="application/json",
+        headers={"Content-Disposition": "attachment; filename=all_sync_logs.json"},
+    )
+
+
+@app.route("/api/sync-logs/<filename>", methods=["DELETE"])
+def api_delete_sync_log(filename):
+    """Delete a specific sync log file."""
+    log_file = SYNC_LOGS_DIR / filename
+    if log_file.exists():
+        log_file.unlink()
+    return jsonify({"success": True})
+
+
+@app.route("/api/sync-logs/cleanup", methods=["POST"])
+def api_cleanup_sync_logs():
+    """Delete sync logs older than N days, or all logs."""
+    data = request.json or {}
+    mode = data.get("mode", "older_than")  # "older_than" or "all"
+    days = int(data.get("days", 30))
+
+    deleted = 0
+    try:
+        for f in SYNC_LOGS_DIR.glob("*.jsonl"):
+            if mode == "all":
+                f.unlink()
+                deleted += 1
+            elif mode == "older_than":
+                age_days = (time.time() - f.stat().st_mtime) / 86400
+                if age_days > days:
+                    f.unlink()
+                    deleted += 1
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({"success": True, "deleted": deleted})
+
+
+@app.route("/api/sync-logs/stats")
+def api_sync_logs_stats():
+    """Get aggregate stats about stored logs."""
+    total_files = 0
+    total_size = 0
+    oldest = None
+    newest = None
+    try:
+        for f in SYNC_LOGS_DIR.glob("*.jsonl"):
+            total_files += 1
+            stat = f.stat()
+            total_size += stat.st_size
+            mtime = stat.st_mtime
+            if oldest is None or mtime < oldest:
+                oldest = mtime
+            if newest is None or mtime > newest:
+                newest = mtime
+    except Exception:
+        pass
+
+    return jsonify({
+        "total_files": total_files,
+        "total_size": total_size,
+        "oldest": datetime.fromtimestamp(oldest).isoformat() if oldest else None,
+        "newest": datetime.fromtimestamp(newest).isoformat() if newest else None,
+    })
 
 
 # ─── Startup ───────────────────────────────────────────────────────────

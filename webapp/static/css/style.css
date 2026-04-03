@@ -1067,3 +1067,252 @@ tbody tr:hover {
 }
 
 .tree-item:hover .tree-select-btn { opacity: 1; }
+
+
+/* ─── Global Sync Indicator (sidebar) ─────────────────────────────── */
+.global-sync-indicator {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--border-color);
+    background: var(--accent-light);
+    animation: syncPulse 2s ease-in-out infinite;
+}
+
+@keyframes syncPulse {
+    0%, 100% { background: var(--accent-light); }
+    50% { background: rgba(108, 92, 231, 0.25); }
+}
+
+.global-sync-icon {
+    flex-shrink: 0;
+}
+
+.global-sync-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.global-sync-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 4px;
+}
+
+.global-sync-bar-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.global-sync-bar {
+    flex: 1;
+    height: 4px;
+    background: var(--border-color);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.global-sync-bar-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width 0.5s ease;
+}
+
+.global-sync-pct {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--accent);
+    font-family: var(--font-mono);
+    flex-shrink: 0;
+}
+
+/* ─── Progress Bar (main content area) ────────────────────────────── */
+.progress-bar-container {
+    width: 100%;
+    height: 10px;
+    background: var(--bg-input);
+    border-radius: 5px;
+    overflow: hidden;
+    border: 1px solid var(--border-color);
+}
+
+.progress-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--accent-hover));
+    border-radius: 5px;
+    transition: width 0.5s ease;
+    position: relative;
+}
+
+.progress-bar-fill::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(
+        90deg,
+        transparent 0%,
+        rgba(255,255,255,0.15) 50%,
+        transparent 100%
+    );
+    animation: progressShimmer 2s linear infinite;
+}
+
+@keyframes progressShimmer {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(200%); }
+}
+
+.progress-bar-fill.complete {
+    background: linear-gradient(90deg, var(--success), #00e6b8);
+}
+
+.progress-bar-fill.complete::after {
+    animation: none;
+}
+
+.progress-bar-fill.error {
+    background: linear-gradient(90deg, var(--danger), #ff8888);
+}
+
+.progress-bar-fill.error::after {
+    animation: none;
+}
+
+/* ─── Folder Comparison ───────────────────────────────────────────── */
+.compare-grid {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    gap: 16px;
+    align-items: start;
+    margin-bottom: 16px;
+}
+
+.compare-side {
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 16px;
+}
+
+.compare-side h4 {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    color: var(--text-primary);
+}
+
+.compare-side code {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--accent);
+    background: var(--accent-light);
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+
+.compare-vs {
+    font-size: 24px;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding-top: 40px;
+}
+
+.compare-stats {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.compare-stat {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+}
+
+.compare-stat-value {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+}
+
+.compare-stat-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    font-weight: 600;
+}
+
+.compare-result {
+    padding: 16px;
+    border-radius: var(--radius-sm);
+    font-size: 14px;
+}
+
+.compare-result.success {
+    background: var(--success-light);
+    color: var(--success);
+    font-weight: 600;
+}
+
+.compare-result.warning {
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+}
+
+.compare-diff {
+    margin-bottom: 16px;
+}
+
+.compare-diff h5 {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+}
+
+.compare-file-list {
+    max-height: 200px;
+    overflow-y: auto;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 8px;
+}
+
+.compare-file {
+    font-size: 12px;
+    font-family: var(--font-mono);
+    color: var(--text-secondary);
+    padding: 3px 8px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.compare-file:last-child {
+    border-bottom: none;
+}
+
+/* ─── Responsive adjustments for comparison ───────────────────────── */
+@media (max-width: 900px) {
+    .compare-grid {
+        grid-template-columns: 1fr;
+    }
+    .compare-vs {
+        padding-top: 0;
+        font-size: 18px;
+    }
+}
