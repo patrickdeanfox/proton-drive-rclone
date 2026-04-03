@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Proton Drive Manager{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-layout">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-brand">
+                <div class="brand-icon">
+                    <i class="fas fa-shield-halved" style="font-size:16px"></i>
+                </div>
+                <div>
+                    <h1>Proton Drive</h1>
+                    <small>Sync Manager</small>
+                </div>
+            </div>
+            <nav class="sidebar-nav">
+                <a href="/" class="{% if active == 'dashboard' %}active{% endif %}">
+                    <span class="nav-icon"><i class="fas fa-chart-pie"></i></span> Dashboard
+                </a>
+
+                <div class="nav-section">Sync</div>
+                <a href="/sync-schedules" class="{% if active == 'sync' %}active{% endif %}">
+                    <span class="nav-icon"><i class="fas fa-arrows-rotate"></i></span> Sync & Schedules
+                </a>
+                <a href="/connection" class="{% if active == 'connection' %}active{% endif %}">
+                    <span class="nav-icon"><i class="fas fa-plug"></i></span> Connection
+                </a>
+                <a href="/logs" class="{% if active == 'logs' %}active{% endif %}">
+                    <span class="nav-icon"><i class="fas fa-scroll"></i></span> Logs
+                </a>
+
+                <div class="nav-section">AI Tools</div>
+                <a href="/ai/" class="{% if active == 'ai' %}active{% endif %}">
+                    <span class="nav-icon"><i class="fas fa-brain"></i></span> AI Organizer
+                </a>
+
+                <div class="nav-section">Configure</div>
+                <a href="/all-settings" class="{% if active == 'settings' %}active{% endif %}">
+                    <span class="nav-icon"><i class="fas fa-gear"></i></span> Settings
+                </a>
+
+                <div class="nav-section">External</div>
+                <a href="https://drive.proton.me/" target="_blank" rel="noopener" class="external-link">
+                    <span class="nav-icon"><i class="fas fa-arrow-up-right-from-square"></i></span> Proton Drive
+                </a>
+            </nav>
+
+            <!-- Global Sync Indicator -->
+            <div id="global-sync-indicator" class="global-sync-indicator" style="display:none"></div>
+
+            <!-- WebSocket Status -->
+            <div class="ws-status">
+                <span class="ws-dot" id="ws-dot"></span>
+                <span id="ws-label">Connecting...</span>
+            </div>
+
+            <div class="sidebar-footer">
+                <div>protondrive-linux v0.2.0</div>
+                <div style="margin-top:3px;">Powered by rclone</div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+
+    <!-- Toast Container -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+    <script src="/static/js/progress.js"></script>
+    <script src="/static/js/app.js"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

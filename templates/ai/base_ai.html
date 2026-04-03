@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}AI File Organizer{% endblock %} — Proton Drive</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/ai.css">
+</head>
+<body>
+    <div class="app-layout">
+        <aside class="sidebar">
+            <div class="sidebar-brand">
+                <div class="brand-icon">🧠</div>
+                <div>
+                    <h1>AI Organizer</h1>
+                    <small>Proton Drive</small>
+                </div>
+            </div>
+            <nav class="sidebar-nav">
+                <div class="nav-section-label">Overview</div>
+                <a href="/ai/dashboard" class="{% if active == 'ai_dashboard' %}active{% endif %}">
+                    <span class="nav-icon">📊</span> Dashboard
+                </a>
+
+                <div class="nav-section-label">Organize</div>
+                <a href="/ai/organize" class="{% if active == 'ai_organize' %}active{% endif %}">
+                    <span class="nav-icon">📂</span> Organize Files
+                </a>
+                <a href="/ai/rules" class="{% if active == 'ai_rules' %}active{% endif %}">
+                    <span class="nav-icon">📋</span> Rules
+                </a>
+                <a href="/ai/duplicates" class="{% if active == 'ai_duplicates' %}active{% endif %}">
+                    <span class="nav-icon">🔍</span> Duplicates
+                </a>
+
+                <div class="nav-section-label">Configuration</div>
+                <a href="/ai/ai-settings" class="{% if active == 'ai_settings' %}active{% endif %}">
+                    <span class="nav-icon">🤖</span> AI Models
+                </a>
+                <a href="/ai/db-settings" class="{% if active == 'ai_db' %}active{% endif %}">
+                    <span class="nav-icon">🗄️</span> Database
+                </a>
+                <a href="/ai/rclone-settings" class="{% if active == 'ai_rclone' %}active{% endif %}">
+                    <span class="nav-icon">🔄</span> Rclone
+                </a>
+
+                <div class="nav-section-label">Migrate</div>
+                <a href="/ai/migration" class="{% if active == 'ai_migration' %}active{% endif %}">
+                    <span class="nav-icon">📦</span> Dropbox Migration
+                </a>
+
+                <div class="nav-section-label">Extend</div>
+                <a href="/ai/extensions" class="{% if active == 'ai_extensions' %}active{% endif %}">
+                    <span class="nav-icon">🧩</span> Extensions
+                </a>
+
+                <div class="nav-section-label">Sync Manager</div>
+                <a href="/">
+                    <span class="nav-icon">⚡</span> Back to Sync
+                </a>
+            </nav>
+            <div class="sidebar-footer">
+                <div>protondrive-linux v1.0.0</div>
+                <div style="margin-top: 4px;">AI-Powered Organizer</div>
+            </div>
+        </aside>
+
+        <main class="main-content">
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+
+    <div id="toast-container"></div>
+
+    <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+    <script src="/static/js/progress.js"></script>
+    <script src="/static/js/ai.js"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

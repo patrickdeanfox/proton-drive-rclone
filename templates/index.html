@@ -1,0 +1,118 @@
+{% extends 'base.html' %}
+{% set active = 'dashboard' %}
+{% block title %}Dashboard — Proton Drive Manager{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h2><i class="fas fa-chart-pie" style="color:var(--proton-purple-light);margin-right:8px"></i>Dashboard</h2>
+    <p>Overview of your Proton Drive sync status and quick actions.</p>
+</div>
+
+<!-- Status Cards -->
+<div id="dashboard-stats" class="stats-grid">
+    <div class="stat-card"><div class="skeleton skeleton-title"></div><div class="skeleton skeleton-text"></div></div>
+    <div class="stat-card"><div class="skeleton skeleton-title"></div><div class="skeleton skeleton-text"></div></div>
+    <div class="stat-card"><div class="skeleton skeleton-title"></div><div class="skeleton skeleton-text"></div></div>
+    <div class="stat-card"><div class="skeleton skeleton-title"></div><div class="skeleton skeleton-text"></div></div>
+    <div class="stat-card"><div class="skeleton skeleton-title"></div><div class="skeleton skeleton-text"></div></div>
+    <div class="stat-card"><div class="skeleton skeleton-title"></div><div class="skeleton skeleton-text"></div></div>
+</div>
+
+<!-- What's Happening -->
+<div class="card" id="whats-happening" style="display:none">
+    <div class="card-header">
+        <h3><i class="fas fa-bolt" style="color:var(--warning)"></i> What's Happening Now</h3>
+        <span class="badge badge-live"><i class="fas fa-circle" style="font-size:6px"></i> Live</span>
+    </div>
+    <div id="live-operations"></div>
+</div>
+
+<!-- Quick Actions -->
+<div class="card">
+    <div class="card-header">
+        <h3><i class="fas fa-rocket" style="color:var(--proton-purple-light)"></i> Quick Actions</h3>
+    </div>
+    <div class="btn-group" style="flex-wrap:wrap">
+        <button class="btn btn-primary" onclick="doMount()"><i class="fas fa-link"></i> Mount Drive</button>
+        <button class="btn btn-ghost" onclick="doUnmount()"><i class="fas fa-eject"></i> Unmount</button>
+        <button class="btn btn-ghost" onclick="doHealthCheck()"><i class="fas fa-heartbeat"></i> Health Check</button>
+        <button class="btn btn-ghost" onclick="loadDashboard()"><i class="fas fa-sync-alt"></i> Refresh</button>
+        <a href="/sync-schedules" class="btn btn-outline-purple"><i class="fas fa-arrows-rotate"></i> Go to Sync</a>
+    </div>
+</div>
+
+<!-- Getting Started Guide -->
+<div class="card" id="getting-started">
+    <div class="card-header">
+        <h3><i class="fas fa-lightbulb" style="color:var(--warning)"></i> Getting Started</h3>
+        <button class="btn btn-ghost btn-xs" onclick="this.closest('.card').style.display='none'"><i class="fas fa-times"></i></button>
+    </div>
+    <div style="font-size:14px;color:var(--text-secondary);line-height:1.8">
+        <p><strong>1. Install rclone</strong> — Run <code style="color:var(--proton-purple-light);background:var(--proton-purple-subtle);padding:2px 6px;border-radius:3px">curl https://rclone.org/install.sh | sudo bash</code></p>
+        <p><strong>2. Configure Proton Drive</strong> — Run <code style="color:var(--proton-purple-light);background:var(--proton-purple-subtle);padding:2px 6px;border-radius:3px">rclone config</code> and set up a "protondrive" remote</p>
+        <p><strong>3. Set up Sync</strong> — Go to <a href="/sync-schedules">Sync & Schedules</a> to configure folders to sync</p>
+        <p><strong>4. Automate</strong> — Create schedules to keep your files in sync automatically</p>
+        <p style="margin-top:8px"><a href="https://drive.proton.me/" target="_blank" style="color:var(--proton-purple-light)"><i class="fas fa-external-link-alt"></i> Open Proton Drive Web</a></p>
+    </div>
+</div>
+
+<!-- Sync History -->
+<div class="card">
+    <div class="card-header">
+        <h3><i class="fas fa-history" style="color:var(--text-muted)"></i> Recent Sync History</h3>
+        <a href="/logs" class="btn btn-ghost btn-xs">View All Logs →</a>
+    </div>
+    <div id="dashboard-history">
+        <div class="loading-overlay"><span class="spinner"></span></div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Listen for live sync events and show in "What's Happening"
+ProgressManager.onSync((event, data) => {
+    const section = document.getElementById('whats-happening');
+    const ops = document.getElementById('live-operations');
+    if (!section || !ops) return;
+
+    if (event === 'sync_started') {
+        section.style.display = 'block';
+        ops.innerHTML = `<div style="display:flex;align-items:center;gap:12px;padding:12px 0">
+            <span class="spinner"></span>
+            <div>
+                <div style="font-weight:600">${escHtml(data.name || 'Sync')}</div>
+                <div style="font-size:12px;color:var(--text-muted)">Starting sync operation...</div>
+            </div>
+        </div>`;
+    } else if (event === 'sync_progress' && data.progress) {
+        section.style.display = 'block';
+        const p = data.progress;
+        ops.innerHTML = `<div style="padding:12px 0">
+            <div style="display:flex;justify-content:space-between;margin-bottom:8px">
+                <span style="font-weight:600">${escHtml(data.name || 'Sync')}</span>
+                <span style="font-family:var(--font-mono);color:var(--proton-purple-light)">${p.percent || 0}%</span>
+            </div>
+            <div class="progress-bar-container">
+                <div class="progress-bar-fill" style="width:${p.percent || 0}%"></div>
+            </div>
+            <div style="display:flex;gap:16px;margin-top:6px;font-size:12px;color:var(--text-muted)">
+                ${p.bytes_done ? `<span>${p.bytes_done} / ${p.bytes_total}</span>` : ''}
+                ${p.speed ? `<span>${p.speed}</span>` : ''}
+                ${p.eta ? `<span>ETA: ${p.eta}</span>` : ''}
+            </div>
+        </div>`;
+    } else if (event === 'sync_completed') {
+        const ok = data.success;
+        ops.innerHTML = `<div style="display:flex;align-items:center;gap:12px;padding:12px 0">
+            <i class="fas ${ok ? 'fa-check-circle' : 'fa-times-circle'}" style="font-size:20px;color:var(${ok ? '--success' : '--danger'})"></i>
+            <div>
+                <div style="font-weight:600">${escHtml(data.name || 'Sync')} — ${ok ? 'Completed' : 'Failed'}</div>
+            </div>
+        </div>`;
+        setTimeout(() => { section.style.display = 'none'; }, 10000);
+        loadDashboard();
+    }
+});
+</script>
+{% endblock %}

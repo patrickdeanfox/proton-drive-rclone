@@ -1,0 +1,174 @@
+{% extends 'ai/base_ai.html' %}
+{% block title %}Duplicate Detection{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h2>🔍 Duplicate Detection</h2>
+    <p class="page-desc">Find exact and near-duplicate files using hashing and perceptual analysis.</p>
+</div>
+
+<div class="section-card">
+    <h3>Detection Controls</h3>
+    <div class="action-buttons">
+        <button class="btn btn-primary" onclick="detect('exact')">🔒 Exact Duplicates (SHA-256)</button>
+        <button class="btn btn-primary" onclick="detect('near')">🖼️ Near Duplicates (Perceptual Hash)</button>
+        <button class="btn btn-secondary" onclick="detect('all')">🔎 Run Both</button>
+    </div>
+    <div id="detect-status" class="status-msg"></div>
+</div>
+
+<div class="section-card">
+    <h3>Filters</h3>
+    <div class="form-row">
+        <select id="filter-type" class="input" onchange="loadGroups()">
+            <option value="">All Types</option>
+            <option value="exact">Exact</option>
+            <option value="near">Near</option>
+        </select>
+        <select id="filter-status" class="input" onchange="loadGroups()">
+            <option value="">All Statuses</option>
+            <option value="pending">Pending</option>
+            <option value="reviewed">Reviewed</option>
+            <option value="resolved">Resolved</option>
+        </select>
+    </div>
+</div>
+
+<div class="section-card">
+    <h3>Duplicate Groups</h3>
+    <div id="groups-list" class="groups-list"><p class="muted">Loading…</p></div>
+</div>
+
+<!-- Detail modal -->
+<div id="detail-modal" class="modal" style="display:none">
+    <div class="modal-content modal-wide">
+        <div class="modal-header">
+            <h3>Duplicate Group Details</h3>
+            <button class="btn-close" onclick="closeDetail()">✕</button>
+        </div>
+        <div id="detail-members" class="detail-members"></div>
+        <div class="modal-actions">
+            <button class="btn btn-secondary" onclick="closeDetail()">Cancel</button>
+            <button class="btn btn-primary" onclick="resolveGroup()">✅ Resolve</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const API = '/ai/api';
+let currentGroupId = null;
+
+async function detect(mode) {
+    el('detect-status').textContent = 'Starting detection...';
+    const r = await postJSON(API + '/duplicates/detect', { mode });
+    if (r.ok) {
+        showToast('Detection started');
+        const interval = setInterval(async () => {
+            try {
+                const s = await (await fetch(API + '/job/' + r.job_id)).json();
+                el('detect-status').textContent = s.message || s.status;
+                if (s.status === 'completed' || s.status === 'failed') {
+                    clearInterval(interval);
+                    loadGroups();
+                }
+            } catch(e) { clearInterval(interval); }
+        }, 2000);
+    } else {
+        el('detect-status').textContent = r.error || 'Failed';
+    }
+}
+
+async function loadGroups() {
+    const type = el('filter-type').value;
+    const status = el('filter-status').value;
+    let url = API + '/duplicates/groups?limit=50';
+    if (type) url += '&type=' + type;
+    if (status) url += '&status=' + status;
+
+    try {
+        const r = await (await fetch(url)).json();
+        if (r.ok && r.groups.length) {
+            el('groups-list').innerHTML = r.groups.map(g => `
+                <div class="group-row" onclick="showDetail(${g.id})">
+                    <span class="badge badge-${g.detection_type}">${g.detection_type}</span>
+                    <span class="group-count">${g.member_count} files</span>
+                    <span class="badge badge-${g.status}">${g.status}</span>
+                    <span class="group-time">${g.created_at ? new Date(g.created_at).toLocaleString() : ''}</span>
+                </div>
+            `).join('');
+        } else {
+            el('groups-list').innerHTML = '<p class="muted">No duplicate groups found. Run detection first.</p>';
+        }
+    } catch(e) {
+        el('groups-list').innerHTML = '<p class="muted">Error loading groups. Check DB connection.</p>';
+    }
+}
+
+async function showDetail(groupId) {
+    currentGroupId = groupId;
+    el('detail-modal').style.display = 'flex';
+    el('detail-members').innerHTML = '<p>Loading…</p>';
+
+    const r = await (await fetch(API + '/duplicates/groups/' + groupId)).json();
+    if (r.ok) {
+        el('detail-members').innerHTML = r.members.map(m => `
+            <div class="member-row">
+                <div class="member-info">
+                    <strong>${escapeHtml(m.file_name)}</strong>
+                    <small>${escapeHtml(m.file_path)}</small>
+                    <small>${formatBytes(m.size_bytes)} · ${m.mime_type || ''} · Similarity: ${(m.similarity * 100).toFixed(1)}%</small>
+                </div>
+                <div class="member-actions">
+                    <label class="keep-label">
+                        <input type="radio" name="mem-${m.id}" value="true" ${m.keep === true ? 'checked' : ''}> Keep
+                    </label>
+                    <label class="delete-label">
+                        <input type="radio" name="mem-${m.id}" value="false" ${m.keep === false ? 'checked' : ''}> Delete
+                    </label>
+                </div>
+            </div>
+        `).join('');
+    }
+}
+
+function closeDetail() {
+    el('detail-modal').style.display = 'none';
+    currentGroupId = null;
+}
+
+async function resolveGroup() {
+    if (!currentGroupId) return;
+    const actions = {};
+    document.querySelectorAll('[name^="mem-"]:checked').forEach(r => {
+        const mid = r.name.replace('mem-', '');
+        actions[mid] = r.value === 'true';
+    });
+    const r = await postJSON(API + '/duplicates/resolve', {
+        group_id: currentGroupId, actions
+    });
+    if (r.ok) {
+        showToast('Group resolved');
+        closeDetail();
+        loadGroups();
+    } else {
+        showToast(r.error || 'Failed', 'error');
+    }
+}
+
+function formatBytes(b) {
+    if (!b) return '0 B';
+    const u = ['B','KB','MB','GB','TB'];
+    let i = 0;
+    while (b >= 1024 && i < u.length-1) { b /= 1024; i++; }
+    return b.toFixed(1) + ' ' + u[i];
+}
+
+function escapeHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = s || '';
+    return d.innerHTML;
+}
+
+loadGroups();
+</script>
+{% endblock %}

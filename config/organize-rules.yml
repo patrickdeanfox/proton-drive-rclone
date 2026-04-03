@@ -1,0 +1,53 @@
+# Proton Drive AI Organizer — Default Organization Rules
+# Import these via the web UI (Rules → Import YAML)
+
+rules:
+  - name: Photos
+    extensions: [jpg, jpeg, png, gif, webp, heic, bmp, tiff, raw, cr2, nef, arw]
+    dest: Photos
+    priority: 10
+
+  - name: Videos
+    extensions: [mp4, mov, avi, mkv, webm, flv, wmv, m4v]
+    dest: Videos
+    priority: 10
+
+  - name: Documents
+    extensions: [pdf, doc, docx, odt, txt, rtf, md, tex, epub]
+    dest: Documents
+    priority: 8
+
+  - name: Spreadsheets
+    extensions: [xls, xlsx, csv, ods, tsv]
+    dest: Documents/Spreadsheets
+    priority: 7
+
+  - name: Presentations
+    extensions: [ppt, pptx, odp, key]
+    dest: Documents/Presentations
+    priority: 7
+
+  - name: Audio
+    extensions: [mp3, wav, flac, aac, ogg, wma, m4a, opus]
+    dest: Audio
+    priority: 8
+
+  - name: Archives
+    extensions: [zip, tar, gz, bz2, xz, 7z, rar, zst]
+    dest: Archives
+    priority: 5
+
+  - name: Code
+    extensions: [py, js, ts, html, css, java, c, cpp, h, go, rs, rb, php, sh, sql]
+    dest: Code
+    priority: 5
+
+  - name: Fonts
+    extensions: [ttf, otf, woff, woff2, eot]
+    dest: Fonts
+    priority: 4
+
+  - name: Disk Images
+    extensions: [iso, img, dmg, vmdk]
+    dest: "Disk Images"
+    priority: 3

@@ -1,0 +1,39 @@
+{% extends 'ai/base_ai.html' %}
+{% block title %}Extensions{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h2>🧩 Extensions</h2>
+    <p class="page-desc">Future modules and integrations. These are planned features that can be enabled as they become available.</p>
+</div>
+
+<div id="extensions-grid" class="extensions-grid"><p class="muted">Loading…</p></div>
+{% endblock %}
+{% block scripts %}
+<script>
+const API = '/ai/api';
+
+async function loadExtensions() {
+    try {
+        const r = await (await fetch(API + '/extensions')).json();
+        if (r.ok) {
+            el('extensions-grid').innerHTML = r.extensions.map(ext => `
+                <div class="extension-card">
+                    <div class="ext-header">
+                        <span class="ext-icon">${ext.icon}</span>
+                        <h4>${ext.name}</h4>
+                    </div>
+                    <p>${ext.description}</p>
+                    <div class="ext-footer">
+                        <span class="badge badge-${ext.status}">${ext.status}</span>
+                    </div>
+                </div>
+            `).join('');
+        }
+    } catch(e) {
+        el('extensions-grid').innerHTML = '<p class="muted">Could not load extensions.</p>';
+    }
+}
+
+loadExtensions();
+</script>
+{% endblock %}
