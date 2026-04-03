@@ -1,0 +1,38 @@
+{% extends 'base.html' %}
+{% set active = 'dashboard' %}
+{% block title %}Dashboard — Proton Drive Manager{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h2>Dashboard</h2>
+    <p>Overview of your Proton Drive sync status and quick actions.</p>
+</div>
+
+<!-- Status Cards -->
+<div id="dashboard-stats" class="stats-grid">
+    <div class="loading-overlay"><span class="spinner"></span> Loading status...</div>
+</div>
+
+<!-- Quick Actions -->
+<div class="card">
+    <div class="card-header">
+        <h3>⚡ Quick Actions</h3>
+    </div>
+    <div class="btn-group">
+        <button class="btn btn-primary" onclick="doMount()">🔗 Mount Drive</button>
+        <button class="btn btn-ghost" onclick="doUnmount()">⏏️ Unmount</button>
+        <button class="btn btn-ghost" onclick="doHealthCheck()">🩺 Health Check</button>
+        <button class="btn btn-ghost" onclick="loadDashboard()">🔄 Refresh</button>
+    </div>
+</div>
+
+<!-- Sync History -->
+<div class="card">
+    <div class="card-header">
+        <h3>📜 Recent Sync History</h3>
+    </div>
+    <div id="dashboard-history">
+        <div class="loading-overlay"><span class="spinner"></span></div>
+    </div>
+</div>
+{% endblock %}

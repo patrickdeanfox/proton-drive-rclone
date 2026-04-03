@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% block title %}Compare – Proton Drive Manager{% endblock %}
+
+{% block content %}
+<div class="row g-3">
+    <!-- Config -->
+    <div class="col-lg-4">
+        <div class="card bg-dark border-secondary">
+            <div class="card-header"><i class="bi bi-clipboard2-data me-2"></i>Folder Comparison</div>
+            <div class="card-body">
+                <form id="compare-form" onsubmit="return startComparison(event)">
+                    <div class="mb-3">
+                        <label class="form-label">Local Path</label>
+                        <input type="text" class="form-control" id="cmp-local-path" value="~/ProtonDrive">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Remote Name</label>
+                        <input type="text" class="form-control" id="cmp-remote-name" value="protondrive">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Remote Path</label>
+                        <input type="text" class="form-control" id="cmp-remote-path" value="/">
+                    </div>
+                    <div class="mb-3 form-check">
+                        <input type="checkbox" class="form-check-input" id="cmp-simulate" checked>
+                        <label class="form-check-label" for="cmp-simulate">Demo Mode</label>
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100" id="cmp-start-btn">
+                        <i class="bi bi-search me-1"></i>Compare Now
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Results -->
+    <div class="col-lg-8">
+        <!-- Progress -->
+        <div class="card bg-dark border-secondary mb-3" id="cmp-progress-card" style="display:none;">
+            <div class="card-body">
+                <div class="d-flex justify-content-between mb-1">
+                    <span id="cmp-status-text">Comparing...</span>
+                    <span id="cmp-percent-text">0%</span>
+                </div>
+                <div class="progress" style="height: 20px;">
+                    <div id="cmp-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated"
+                         style="width: 0%">0%</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Comparison Results -->
+        <div class="card bg-dark border-secondary mb-3" id="cmp-results-card" style="display:none;">
+            <div class="card-header"><i class="bi bi-bar-chart me-2"></i>Comparison Results</div>
+            <div class="card-body">
+                <div class="row g-3 mb-3">
+                    <!-- Local stats -->
+                    <div class="col-md-6">
+                        <div class="card bg-body-secondary border-0">
+                            <div class="card-body text-center">
+                                <i class="bi bi-pc-display fs-2 text-info"></i>
+                                <h6 class="mt-2">Local</h6>
+                                <div id="cmp-local-stats">
+                                    <span class="fs-5 fw-bold" id="cmp-local-files">0</span> files<br>
+                                    <span class="fs-5 fw-bold" id="cmp-local-folders">0</span> folders<br>
+                                    <span class="text-muted" id="cmp-local-size">0 B</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Remote stats -->
+                    <div class="col-md-6">
+                        <div class="card bg-body-secondary border-0">
+                            <div class="card-body text-center">
+                                <i class="bi bi-cloud fs-2 text-primary"></i>
+                                <h6 class="mt-2">Proton Drive</h6>
+                                <div id="cmp-remote-stats">
+                                    <span class="fs-5 fw-bold" id="cmp-remote-files">0</span> files<br>
+                                    <span class="fs-5 fw-bold" id="cmp-remote-folders">0</span> folders<br>
+                                    <span class="text-muted" id="cmp-remote-size">0 B</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sync status -->
+                <div id="cmp-sync-status" class="alert" style="display:none;"></div>
+
+                <!-- Missing files -->
+                <div id="cmp-missing-section" style="display:none;">
+                    <h6><i class="bi bi-exclamation-diamond me-2"></i>Missing on Remote</h6>
+                    <div id="cmp-missing-list" class="list-group list-group-flush mb-3"></div>
+                    <button class="btn btn-warning w-100" id="cmp-sync-missing-btn" onclick="syncMissingFiles()">
+                        <i class="bi bi-cloud-arrow-up me-1"></i>Sync Missing Files to Proton Drive
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Comparison Log -->
+        <div class="card bg-dark border-secondary">
+            <div class="card-header"><i class="bi bi-terminal me-2"></i>Comparison Log</div>
+            <div class="card-body p-0">
+                <div id="cmp-log-feed" class="log-feed">
+                    <div class="text-muted text-center py-4 small">
+                        Start a comparison to see activity logs.
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Sync confirmation modal -->
+<div class="modal fade" id="syncConfirmModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-warning text-dark">
+                <h5 class="modal-title"><i class="bi bi-cloud-arrow-up me-2"></i>Confirm Sync</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p>You are about to sync <strong id="sync-confirm-count">0</strong> missing files to Proton Drive.</p>
+                <p class="text-muted small">This will upload the files that exist locally but are missing from the remote.</p>
+                <div id="sync-confirm-files" class="small"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-warning" id="sync-confirm-go" onclick="confirmSyncMissing()">
+                    <i class="bi bi-cloud-arrow-up me-1"></i>Sync Now
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/compare.js"></script>
+{% endblock %}

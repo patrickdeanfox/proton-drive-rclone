@@ -1,0 +1,9 @@
+flask>=3.0.0
+apscheduler>=3.10.0
+psycopg2-binary>=2.9.0
+pyyaml>=6.0
+Pillow>=10.0.0
+numpy>=1.24.0
+# Optional — for local AI (CLIP model):
+# torch>=2.0.0
+# transformers>=4.30.0

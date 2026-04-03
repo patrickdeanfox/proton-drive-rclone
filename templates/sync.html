@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}Sync – Proton Drive Manager{% endblock %}
+
+{% block content %}
+<div class="row g-3">
+    <!-- Sync Configuration -->
+    <div class="col-lg-5">
+        <div class="card bg-dark border-secondary">
+            <div class="card-header"><i class="bi bi-arrow-repeat me-2"></i>Sync Configuration</div>
+            <div class="card-body">
+                <form id="sync-form" onsubmit="return startSync(event)">
+                    <div class="mb-3">
+                        <label class="form-label">Direction</label>
+                        <div class="btn-group w-100" role="group">
+                            <input type="radio" class="btn-check" name="direction" id="dir-upload" value="upload" checked>
+                            <label class="btn btn-outline-primary" for="dir-upload">
+                                <i class="bi bi-cloud-arrow-up me-1"></i>Upload
+                            </label>
+                            <input type="radio" class="btn-check" name="direction" id="dir-download" value="download">
+                            <label class="btn btn-outline-primary" for="dir-download">
+                                <i class="bi bi-cloud-arrow-down me-1"></i>Download
+                            </label>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Local Path</label>
+                        <input type="text" class="form-control" id="sync-local-path" value="~/ProtonDrive" placeholder="/home/user/ProtonDrive">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Remote</label>
+                        <input type="text" class="form-control" id="sync-remote" value="protondrive:" placeholder="protondrive:">
+                    </div>
+                    <div class="mb-3 form-check">
+                        <input type="checkbox" class="form-check-input" id="sync-dry-run">
+                        <label class="form-check-label" for="sync-dry-run">Dry Run (preview only)</label>
+                    </div>
+                    <div class="mb-3 form-check">
+                        <input type="checkbox" class="form-check-input" id="sync-simulate" checked>
+                        <label class="form-check-label" for="sync-simulate">Demo Mode (simulated)</label>
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100" id="sync-start-btn">
+                        <i class="bi bi-play-fill me-1"></i>Start Sync
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <!-- Other Actions -->
+        <div class="card bg-dark border-secondary mt-3">
+            <div class="card-header"><i class="bi bi-tools me-2"></i>Other Actions</div>
+            <div class="card-body d-grid gap-2">
+                <button class="btn btn-success" onclick="startBackup()">
+                    <i class="bi bi-shield-check me-1"></i>Full Backup
+                </button>
+                <button class="btn btn-warning" onclick="startCleanup()">
+                    <i class="bi bi-eraser me-1"></i>Cleanup Duplicates
+                </button>
+                <button class="btn btn-info" onclick="startHealthCheck()">
+                    <i class="bi bi-heart-pulse me-1"></i>Health Check
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Progress and Logs -->
+    <div class="col-lg-7">
+        <!-- Transfer Progress -->
+        <div class="card bg-dark border-secondary mb-3">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-speedometer me-2"></i>Transfer Progress</span>
+                <button class="btn btn-sm btn-outline-danger d-none" id="cancel-sync-btn" onclick="cancelCurrentSync()">
+                    <i class="bi bi-x-circle me-1"></i>Cancel
+                </button>
+            </div>
+            <div class="card-body">
+                <div id="sync-progress-area">
+                    <div class="text-muted text-center py-3" id="sync-no-activity">
+                        No active transfers. Start a sync to see progress.
+                    </div>
+                    <div class="d-none" id="sync-active-progress">
+                        <div class="d-flex justify-content-between mb-1">
+                            <span id="sync-status-text" class="small">Preparing...</span>
+                            <span id="sync-percent-text" class="small fw-bold">0%</span>
+                        </div>
+                        <div class="progress mb-2" style="height: 24px;">
+                            <div id="sync-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated"
+                                 role="progressbar" style="width: 0%">0%</div>
+                        </div>
+                        <div class="d-flex justify-content-between small text-muted">
+                            <span id="sync-op-type"></span>
+                            <span id="sync-elapsed"></span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Multiple operations progress -->
+                <div id="multi-ops-progress" class="mt-3"></div>
+            </div>
+        </div>
+
+        <!-- Real-time Sync Logs -->
+        <div class="card bg-dark border-secondary">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-terminal me-2"></i>Sync Logs (Real-time)</span>
+                <div>
+                    <button class="btn btn-sm btn-outline-info me-1" onclick="downloadCurrentLogs()">
+                        <i class="bi bi-download me-1"></i>JSON
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary" onclick="clearSyncLogs()">Clear</button>
+                </div>
+            </div>
+            <div class="card-body p-0">
+                <div id="sync-log-feed" class="log-feed log-feed-tall">
+                    <div class="text-muted text-center py-4 small">
+                        Logs will appear here in real-time during sync operations.
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/sync.js"></script>
+{% endblock %}

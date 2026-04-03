@@ -1,0 +1,217 @@
+/* Proton Drive Manager – Custom Styles */
+
+:root {
+    --pd-primary: #6d4aff;
+    --pd-primary-light: #8b6fff;
+    --pd-dark: #1a1a2e;
+    --pd-darker: #0f0f1a;
+    --pd-surface: #16213e;
+    --pd-success: #22c55e;
+    --pd-warning: #f59e0b;
+    --pd-danger: #ef4444;
+    --pd-info: #06b6d4;
+}
+
+body {
+    background-color: var(--pd-darker);
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+}
+
+.navbar {
+    background: var(--pd-dark) !important;
+    border-bottom: 1px solid rgba(109, 74, 255, 0.3) !important;
+}
+
+.navbar-brand {
+    color: var(--pd-primary-light) !important;
+}
+
+.card {
+    border-radius: 12px;
+    transition: box-shadow 0.2s;
+}
+
+.card:hover {
+    box-shadow: 0 0 20px rgba(109, 74, 255, 0.1);
+}
+
+.card-header {
+    font-weight: 600;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Progress bars */
+.progress {
+    border-radius: 12px;
+    background-color: rgba(255, 255, 255, 0.1);
+}
+
+.progress-bar {
+    border-radius: 12px;
+    background: linear-gradient(90deg, var(--pd-primary), var(--pd-primary-light));
+    transition: width 0.3s ease;
+    font-weight: 600;
+    font-size: 0.85rem;
+}
+
+.progress-bar.bg-success {
+    background: linear-gradient(90deg, #16a34a, var(--pd-success)) !important;
+}
+
+.progress-bar.bg-danger {
+    background: linear-gradient(90deg, #dc2626, var(--pd-danger)) !important;
+}
+
+/* Log feeds */
+.log-feed {
+    max-height: 350px;
+    overflow-y: auto;
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.8rem;
+    background: var(--pd-darker);
+    border-radius: 0 0 12px 12px;
+}
+
+.log-feed-tall {
+    max-height: 500px;
+}
+
+.log-feed-full {
+    max-height: 600px;
+}
+
+.log-entry {
+    padding: 4px 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    transition: background 0.15s;
+}
+
+.log-entry:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.log-entry .log-time {
+    color: #6b7280;
+    white-space: nowrap;
+    min-width: 80px;
+}
+
+.log-entry .log-level {
+    font-weight: 700;
+    text-transform: uppercase;
+    min-width: 50px;
+    font-size: 0.7rem;
+}
+
+.log-entry .log-level.info { color: var(--pd-info); }
+.log-entry .log-level.debug { color: #6b7280; }
+.log-entry .log-level.warning { color: var(--pd-warning); }
+.log-entry .log-level.error { color: var(--pd-danger); }
+
+.log-entry .log-msg {
+    color: #e5e7eb;
+    word-break: break-all;
+    flex: 1;
+}
+
+.log-entry .log-op {
+    color: var(--pd-primary-light);
+    font-size: 0.7rem;
+    white-space: nowrap;
+}
+
+/* Operation cards */
+.op-card {
+    background: var(--pd-surface);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 10px;
+    padding: 12px 16px;
+    margin-bottom: 10px;
+    transition: all 0.2s;
+}
+
+.op-card:hover {
+    border-color: var(--pd-primary);
+}
+
+.op-card .op-type {
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.7rem;
+    letter-spacing: 0.05em;
+}
+
+.op-card .op-type.sync { color: var(--pd-primary-light); }
+.op-card .op-type.backup { color: var(--pd-success); }
+.op-card .op-type.cleanup { color: var(--pd-warning); }
+.op-card .op-type.health { color: var(--pd-info); }
+.op-card .op-type.compare { color: #a78bfa; }
+
+.op-status-badge {
+    font-size: 0.7rem;
+}
+
+/* Toast */
+.toast {
+    border-radius: 10px;
+}
+
+/* Scrollbar */
+.log-feed::-webkit-scrollbar {
+    width: 6px;
+}
+
+.log-feed::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.log-feed::-webkit-scrollbar-thumb {
+    background: rgba(109, 74, 255, 0.3);
+    border-radius: 3px;
+}
+
+.log-feed::-webkit-scrollbar-thumb:hover {
+    background: rgba(109, 74, 255, 0.5);
+}
+
+/* Animations */
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-5px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.log-entry-new {
+    animation: fadeIn 0.3s ease;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+.pulse {
+    animation: pulse 2s infinite;
+}
+
+/* Missing file list */
+.missing-file-item {
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.2);
+    border-radius: 6px;
+    padding: 6px 12px;
+    margin-bottom: 4px;
+    font-size: 0.85rem;
+}
+
+/* Comparison cards */
+.stat-highlight {
+    font-size: 2rem;
+    font-weight: 800;
+    line-height: 1;
+}
+
+.stat-highlight.match { color: var(--pd-success); }
+.stat-highlight.diff { color: var(--pd-warning); }
