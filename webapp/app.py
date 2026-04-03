@@ -253,12 +253,15 @@ def execute_sync_job(job_id):
 
     remote_full = f"{remote}:{remote_path}" if remote_path else f"{remote}:"
 
+    # Slot may already be reserved by api_run_sync; only init if not present
+    # (scheduler-triggered jobs won't have a pre-reserved slot)
     with active_syncs_lock:
-        active_syncs[job_id] = {
-            "lines": [], "done": False, "success": None,
-            "started_at": datetime.now().isoformat(),
-            "name": config.get("name", job_id),
-        }
+        if job_id not in active_syncs or active_syncs[job_id].get("done", True):
+            active_syncs[job_id] = {
+                "lines": [], "done": False, "success": None,
+                "started_at": datetime.now().isoformat(),
+                "name": config.get("name", job_id),
+            }
 
     if direction == "bisync":
         # First-run detection: check bisync state dir for this remote
@@ -514,9 +517,22 @@ def api_delete_sync_config(config_id):
 @app.route("/api/sync-configs/<config_id>/run", methods=["POST"])
 def api_run_sync(config_id):
     """Trigger an immediate sync for a config."""
+    configs = load_json(SYNC_CONFIGS_FILE, [])
+    config = next((c for c in configs if c["id"] == config_id), None)
+    if not config:
+        return jsonify({"success": False, "message": "Config not found"}), 404
+
+    # Claim the slot inside the lock to prevent race conditions on rapid clicks
     with active_syncs_lock:
         if config_id in active_syncs and not active_syncs[config_id].get("done", True):
             return jsonify({"success": False, "message": "Sync already running"})
+        # Reserve the slot before the thread starts so no second request can slip through
+        active_syncs[config_id] = {
+            "lines": [], "done": False, "success": None,
+            "started_at": datetime.now().isoformat(),
+            "name": config.get("name", config_id),
+        }
+
     thread = threading.Thread(target=execute_sync_job, args=(config_id,), daemon=True)
     thread.start()
     return jsonify({"success": True, "message": "Sync started"})

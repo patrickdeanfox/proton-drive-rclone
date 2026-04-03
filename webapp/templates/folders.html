@@ -280,6 +280,39 @@ function renderTree(el, data, side) {
     el.innerHTML = html;
 }
 
-document.addEventListener('DOMContentLoaded', loadConfigs);
+async function checkForRunningSyncs() {
+    const configs = await api('/sync-configs');
+    for (const c of configs) {
+        const status = await api(`/sync-configs/${c.id}/status`);
+        if (status.running) {
+            // Re-attach to the running sync
+            const btn = document.getElementById(`run-btn-${c.id}`);
+            if (btn) { btn.disabled = true; btn.textContent = '⏳ Running...'; }
+
+            activeSyncId = c.id;
+            pollSince = status.total;  // skip already-buffered lines and show from now
+            syncStartTime = status.started_at ? new Date(status.started_at).getTime() : Date.now();
+
+            const card = document.getElementById('progress-card');
+            const logEl = document.getElementById('progress-log');
+            document.getElementById('progress-title').textContent = `⏳ Syncing: ${c.name}`;
+            document.getElementById('progress-spinner').style.display = '';
+            document.getElementById('progress-status').textContent = 'Sync in progress (started before this page loaded)...';
+            // Show buffered output so far
+            status.lines.forEach(line => {
+                const div = document.createElement('div');
+                div.className = 'log-line' + (line.includes('ERROR') || line.includes('✗') ? ' log-error'
+                              : line.includes('✓') || line.includes('completed') ? ' log-success' : '');
+                div.textContent = line;
+                logEl.appendChild(div);
+            });
+            card.style.display = 'block';
+            startPolling(c.id, btn);
+            break;  // only one sync can run per config at a time
+        }
+    }
+}
+
+document.addEventListener('DOMContentLoaded', () => { loadConfigs().then(checkForRunningSyncs); });
 </script>
 {% endblock %}
