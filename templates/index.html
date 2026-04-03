@@ -41,6 +41,17 @@
     </div>
 </div>
 
+<!-- Sync Health Overview (powered by rclone size + history) -->
+<div class="card" id="sync-health-card">
+    <div class="card-header">
+        <h3><i class="fas fa-shield-alt" style="color:var(--proton-purple-light)"></i> Sync Health</h3>
+        <button class="btn btn-ghost btn-xs" onclick="loadSyncHealth()"><i class="fas fa-sync-alt"></i> Refresh</button>
+    </div>
+    <div id="sync-health-grid" class="stats-grid">
+        <div class="stat-card"><span class="text-muted">Loading sync health...</span></div>
+    </div>
+</div>
+
 <!-- Getting Started Guide -->
 <div class="card" id="getting-started">
     <div class="card-header">
@@ -70,6 +81,68 @@
 
 {% block scripts %}
 <script>
+// ─── Sync Health Dashboard ───────────────────────────────────
+async function loadSyncHealth() {
+    const grid = document.getElementById('sync-health-grid');
+    if (!grid) return;
+    try {
+        const data = await api('/sync-dashboard');
+        if (!data.configs || data.configs.length === 0) {
+            grid.innerHTML = '<div class="stat-card"><span class="text-muted">No sync configs yet. <a href="/sync-schedules">Create one</a></span></div>';
+            return;
+        }
+        grid.innerHTML = data.configs.map(c => {
+            const statusColors = {
+                syncing: 'var(--proton-purple-light)',
+                active: 'var(--success)',
+                disabled: 'var(--text-muted)',
+                error: 'var(--danger)',
+            };
+            const statusIcons = {
+                syncing: 'fa-spinner fa-spin',
+                active: 'fa-check-circle',
+                disabled: 'fa-pause-circle',
+                error: 'fa-exclamation-triangle',
+            };
+            const color = statusColors[c.status] || 'var(--text-secondary)';
+            const icon = statusIcons[c.status] || 'fa-question-circle';
+            const lastSync = c.last_sync ? formatDate(c.last_sync) : 'Never';
+            return `<div class="stat-card" style="border-left:3px solid ${color}">
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                    <div class="stat-label">${escHtml(c.name)}</div>
+                    <i class="fas ${icon}" style="color:${color}"></i>
+                </div>
+                <div class="stat-value" style="font-size:14px;color:${color}">${escHtml(c.message)}</div>
+                <div class="stat-sub">
+                    ${c.local_files != null ? c.local_files.toLocaleString() + ' files' : ''}
+                    ${c.local_size ? ' · ' + formatSize(c.local_size) : ''}
+                </div>
+                <div class="stat-sub" style="margin-top:2px">Last sync: ${lastSync}</div>
+                ${c.status === 'active' ? `<button class="btn btn-ghost btn-xs" style="margin-top:8px;font-size:11px" data-cfg-id="${escHtml(c.id)}" onclick="verifySyncFromDashboard(this.dataset.cfgId, this)"><i class="fas fa-fingerprint"></i> Verify Integrity</button>` : ''}
+            </div>`;
+        }).join('');
+    } catch (e) {
+        grid.innerHTML = `<div class="stat-card"><span class="text-muted">Could not load sync health</span></div>`;
+    }
+}
+
+async function verifySyncFromDashboard(configId, btn) {
+    if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner" style="width:12px;height:12px;border-width:2px;display:inline-block"></span> Checking...'; }
+    try {
+        const data = await api(`/sync-configs/${configId}/verify`, { method: 'POST' });
+        if (data.verified) {
+            showToast(`Integrity verified: ${data.matched} files match`, 'success');
+        } else {
+            showToast(`${data.mismatched_count} mismatched, ${data.missing_on_remote_count} missing on remote`, 'error');
+        }
+    } catch (e) {
+        showToast('Verification failed: ' + e.message, 'error');
+    }
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-fingerprint"></i> Verify Integrity'; }
+}
+
+document.addEventListener('DOMContentLoaded', () => { loadSyncHealth(); });
+
 // Listen for live sync events and show in "What's Happening"
 ProgressManager.onSync((event, data) => {
     const section = document.getElementById('whats-happening');
