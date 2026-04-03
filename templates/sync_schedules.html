@@ -364,19 +364,66 @@ async function runSyncWithProgress(configId, configName) {
 
 function startPolling(configId, btn) {
     clearInterval(pollTimer);
+
+    // Filter for "noise" lines (repeated stats lines that clutter the log)
+    // Updated to also handle timestamp-prefixed stats lines from rclone
+    const isStatsNoise = (line) => {
+        if (line.match(/^Transferred:|^Checks:|^Elapsed time:|^\s*$/)) return true;
+        if (line.match(/^\s*[\d.]+\s*[KMGTP]?i?B\s*\/\s*[\d.]+\s*[KMGTP]?i?B/)) return true;
+        // Timestamp-prefixed stats: "2026/04/03 17:47:56 INFO  :    43.751 KiB / 43.751 KiB, 100%"
+        if (line.match(/^\d{4}\/\d{2}\/\d{2}\s+\d{2}:\d{2}:\d{2}.*INFO\s*:\s+[\d.]+\s*[KMGTP]?i?B\s*\//)) return true;
+        return false;
+    };
+
+    function finishSync(ok) {
+        clearInterval(pollTimer);
+        document.getElementById('progress-spinner').style.display = 'none';
+        const elapsed = Date.now() - syncStartTime;
+        document.getElementById('progress-title').innerHTML = ok
+            ? '<i class="fas fa-check-circle" style="color:var(--success)"></i> Sync complete'
+            : '<i class="fas fa-times-circle" style="color:var(--danger)"></i> Sync failed';
+        document.getElementById('progress-status').textContent = ok ? `Completed in ${formatElapsed(elapsed)}` : 'Finished with errors.';
+        document.getElementById('progress-status').style.color = ok ? 'var(--success)' : 'var(--danger)';
+        if (ok) { document.getElementById('stats-bar').style.width = '100%'; document.getElementById('stats-bar').classList.add('complete'); }
+        else { document.getElementById('stats-bar').classList.add('error'); }
+        showToast(ok ? 'Sync completed' : 'Sync failed', ok ? 'success' : 'error');
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-play"></i> Sync'; }
+        activeSyncId = null;
+        loadRecentLogs();
+        loadHistoryTab();
+    }
+
+    // Listen for WebSocket sync_completed for instant UI update (even for fast syncs)
+    let wsCompleted = false;
+    if (typeof ProgressManager !== 'undefined') {
+        ProgressManager.onSync((event, data) => {
+            if (event === 'sync_completed' && data.config_id === configId && !wsCompleted) {
+                wsCompleted = true;
+                finishSync(data.success);
+            } else if (event === 'sync_progress' && data.config_id === configId) {
+                // Update progress bar immediately from WebSocket
+                const p = data.progress || {};
+                if (p.percent !== undefined) document.getElementById('stats-bar').style.width = p.percent + '%';
+                if (p.bytes_done && p.bytes_total) document.getElementById('stats-files').textContent = `${p.bytes_done} / ${p.bytes_total}`;
+                if (p.speed) document.getElementById('stats-speed').textContent = p.speed;
+                if (p.eta) document.getElementById('stats-eta').textContent = `ETA ${p.eta}`;
+            }
+        });
+    }
+
     pollTimer = setInterval(async () => {
+        if (wsCompleted) return;  // Already handled via WebSocket
         try {
             const data = await api(`/sync-configs/${configId}/status?since=${pollSince}`);
             const logEl = document.getElementById('progress-log');
             if (data.lines && data.lines.length) {
                 data.lines.forEach(line => {
-                    if (line.match(/^Transferred:|^Checks:|^Elapsed time:|^\s*$/)) return;
-                    if (line.match(/^\s*[\d.]+\s*[KMGTP]?i?B\s*\/\s*[\d.]+\s*[KMGTP]?i?B/)) return;
+                    if (isStatsNoise(line)) return;
                     const div = document.createElement('div');
                     div.className = 'log-line' +
                         (line.includes('ERROR') || line.includes('✗') ? ' log-error'
                         : line.includes('warn') ? ' log-warn'
-                        : line.includes('✓') || line.includes('Sync completed') ? ' log-success' : '');
+                        : line.includes('✓') || line.includes('Sync completed') || line.includes('auto-kill') ? ' log-success' : '');
                     div.textContent = line;
                     logEl.appendChild(div);
                 });
@@ -394,21 +441,7 @@ function startPolling(configId, btn) {
             if (p.current_file) document.getElementById('stats-detail').textContent = `Transferring: ${p.current_file} (${p.current_file_percent || 0}%)`;
 
             if (!data.running) {
-                clearInterval(pollTimer);
-                document.getElementById('progress-spinner').style.display = 'none';
-                const ok = data.success;
-                document.getElementById('progress-title').innerHTML = ok
-                    ? '<i class="fas fa-check-circle" style="color:var(--success)"></i> Sync complete'
-                    : '<i class="fas fa-times-circle" style="color:var(--danger)"></i> Sync failed';
-                document.getElementById('progress-status').textContent = ok ? `Completed in ${formatElapsed(elapsed)}` : 'Finished with errors.';
-                document.getElementById('progress-status').style.color = ok ? 'var(--success)' : 'var(--danger)';
-                if (ok) { document.getElementById('stats-bar').style.width = '100%'; document.getElementById('stats-bar').classList.add('complete'); }
-                else { document.getElementById('stats-bar').classList.add('error'); }
-                showToast(ok ? 'Sync completed' : 'Sync failed', ok ? 'success' : 'error');
-                if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-play"></i> Sync'; }
-                activeSyncId = null;
-                loadRecentLogs();
-                loadHistoryTab();
+                finishSync(data.success);
             }
         } catch (e) { console.error('Poll error:', e); }
     }, 500);

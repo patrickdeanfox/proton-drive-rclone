@@ -215,19 +215,28 @@ active_syncs_lock = threading.Lock()
 def _parse_rclone_progress(line):
     """Parse rclone stats output line to extract progress information.
     
-    Handles multiple rclone output formats:
+    Handles multiple rclone output formats including timestamp-prefixed lines:
+    - Timestamped one-line: "2026/04/03 17:47:56 INFO  :    43.751 KiB / 43.751 KiB, 100%, 43.749 KiB/s, ETA 0s"
     - Standard multi-line: "Transferred:   5.000 MiB / 23.000 MiB, 22%, 512 KiB/s, ETA 1m30s"
     - One-line stats: "   43.751 KiB / 43.751 KiB, 100%, 43.749 KiB/s, ETA 0s"
     - Compact stats: "Transferred:  5 / 23, 22%"
     """
     progress = {}
 
+    # Strip common rclone timestamp + level prefix to normalize the line
+    # e.g. "2026/04/03 17:47:56 INFO  :    43.751 KiB / ..." → "   43.751 KiB / ..."
+    stripped = re.sub(
+        r'^\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?\s+'
+        r'(?:DEBUG|INFO|NOTICE|WARN|ERROR)\s*:\s*',
+        '', line
+    )
+
     # Match: "Transferred:   5.000 MiB / 23.000 MiB, 22%, 512 KiB/s, ETA 1m30s"
     xfer_match = re.search(
         r'Transferred:\s+([\d.]+\s*\S+)\s*/\s*([\d.]+\s*\S+),\s*(\d+)%'
         r'(?:,\s*([\d.]+\s*\S+/s))?'
         r'(?:,\s*ETA\s+([\w:]+))?',
-        line
+        stripped
     )
     if xfer_match:
         progress["bytes_done"] = xfer_match.group(1).strip()
@@ -238,14 +247,14 @@ def _parse_rclone_progress(line):
         if xfer_match.group(5):
             progress["eta"] = xfer_match.group(5).strip()
 
-    # Match --stats-one-line compact output: "  43.751 KiB / 43.751 KiB, 100%, 43.749 KiB/s, ETA 0s"
-    # This format doesn't have "Transferred:" prefix
+    # Match --stats-one-line compact output (with or without timestamp prefix):
+    # "   43.751 KiB / 43.751 KiB, 100%, 43.749 KiB/s, ETA 0s"
     if not progress:
         oneline_match = re.search(
             r'^\s*([\d.]+\s*[KMGTP]?i?B)\s*/\s*([\d.]+\s*[KMGTP]?i?B),\s*(\d+)%'
             r'(?:,\s*([\d.]+\s*[KMGTP]?i?B/s))?'
             r'(?:,\s*ETA\s*([\w:]+))?',
-            line
+            stripped
         )
         if oneline_match:
             progress["bytes_done"] = oneline_match.group(1).strip()
@@ -257,25 +266,25 @@ def _parse_rclone_progress(line):
                 progress["eta"] = oneline_match.group(5).strip()
 
     # Match file count: "Transferred:            5 / 23, 22%"
-    count_match = re.search(r'Transferred:\s+(\d+)\s*/\s*(\d+),\s*(\d+)%', line)
+    count_match = re.search(r'Transferred:\s+(\d+)\s*/\s*(\d+),\s*(\d+)%', stripped)
     if count_match and "bytes_done" not in progress:
         progress["files_done"] = int(count_match.group(1))
         progress["files_total"] = int(count_match.group(2))
         progress["percent"] = int(count_match.group(3))
 
     # Match: "Checks:   5 / 23, 22%"
-    checks_match = re.search(r'Checks:\s+(\d+)\s*/\s*(\d+),?\s*(\d+)?%?', line)
+    checks_match = re.search(r'Checks:\s+(\d+)\s*/\s*(\d+),?\s*(\d+)?%?', stripped)
     if checks_match:
         progress["checks_done"] = int(checks_match.group(1))
         progress["checks_total"] = int(checks_match.group(2))
 
     # Match: "Errors:                 3"
-    err_match = re.search(r'Errors:\s+(\d+)', line)
+    err_match = re.search(r'Errors:\s+(\d+)', stripped)
     if err_match:
         progress["errors"] = int(err_match.group(1))
 
     # Match individual file transfer: " *  filename.txt:  22% /1.234MiB, 100KiB/s, 0s"
-    file_match = re.search(r'\*\s+(.+?):\s+(\d+)%\s*/\s*([\d.]+\s*\S+)', line)
+    file_match = re.search(r'\*\s+(.+?):\s+(\d+)%\s*/\s*([\d.]+\s*\S+)', stripped)
     if file_match:
         progress["current_file"] = file_match.group(1).strip()
         progress["current_file_percent"] = int(file_match.group(2))
@@ -330,6 +339,9 @@ def _run_rclone_streaming(config_id, rclone_args):
         "command": ["rclone"] + rclone_args,
     }
 
+    # Track whether we've already emitted an early completion
+    _early_completion_emitted = [False]
+
     def _append(line):
         progress = _parse_rclone_progress(line)
         with active_syncs_lock:
@@ -348,6 +360,27 @@ def _run_rclone_streaming(config_id, rclone_args):
                 }, namespace="/progress")
             except Exception:
                 pass
+
+        # --- Early completion detection for fast syncs ---
+        # Detect "Copied (new)" / "Copied (replaced)" which means the actual
+        # file transfer is done. Combined with 100% progress, emit an early
+        # sync_completed so the UI updates immediately instead of waiting for
+        # rclone cleanup/exit.
+        if not _early_completion_emitted[0]:
+            is_copy_done = any(kw in line for kw in ("Copied (new)", "Copied (replaced)", "Copied (updated)"))
+            current_pct = 0
+            with active_syncs_lock:
+                current_pct = active_syncs.get(config_id, {}).get("progress", {}).get("percent", 0)
+            if is_copy_done and current_pct == 100:
+                _early_completion_emitted[0] = True
+                try:
+                    socketio.emit("sync_completed", {
+                        "config_id": config_id, "name": job_name,
+                        "success": True, "early": True,
+                    }, namespace="/progress")
+                except Exception:
+                    pass
+
         # Write to structured log file (no size limit)
         try:
             with open(log_file, "a") as f:
@@ -364,6 +397,17 @@ def _run_rclone_streaming(config_id, rclone_args):
     def _run(args):
         rc = 0
         output_lines = []
+        # Track repeated errors to detect infinite retry loops
+        consecutive_errors = 0
+        MAX_CONSECUTIVE_ERRORS = 15  # Kill after this many consecutive error lines
+        # Track when we hit 100% to detect stale processes
+        reached_100_pct_at = None
+        MAX_STALE_100_SECS = 120  # Kill if stuck at 100% for this long
+        # Error patterns that indicate an unrecoverable loop
+        ERROR_LOOP_PATTERNS = (
+            "RESTY 422",   # Proton Drive "not found" trash errors
+            "RESTY 429",   # Rate limiting loops
+        )
         try:
             proc = subprocess.Popen(
                 ["rclone"] + args,
@@ -377,6 +421,41 @@ def _run_rclone_streaming(config_id, rclone_args):
                 line = line.rstrip()
                 _append(line)
                 output_lines.append(line)
+
+                # --- Error loop detection ---
+                if any(pat in line for pat in ERROR_LOOP_PATTERNS):
+                    consecutive_errors += 1
+                else:
+                    consecutive_errors = 0
+
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                    _append(f"[auto-kill] Detected {consecutive_errors} consecutive API errors — terminating stuck rclone process")
+                    proc.kill()
+                    proc.wait()
+                    # Treat as success if we already reached 100% (transfer done, cleanup failed)
+                    with active_syncs_lock:
+                        pct = active_syncs.get(config_id, {}).get("progress", {}).get("percent", 0)
+                    rc = 0 if pct == 100 else 1
+                    return rc, "\n".join(output_lines)
+
+                # --- Early completion detection ---
+                # Track when we first see 100% progress
+                progress = _parse_rclone_progress(line)
+                if progress and progress.get("percent") == 100:
+                    if reached_100_pct_at is None:
+                        reached_100_pct_at = time.time()
+                elif progress and progress.get("percent", 0) < 100:
+                    reached_100_pct_at = None  # Reset if percent drops
+
+                # If we've been at 100% for too long and process hasn't exited,
+                # it's likely stuck in cleanup — kill it gracefully
+                if reached_100_pct_at and (time.time() - reached_100_pct_at) > MAX_STALE_100_SECS:
+                    _append(f"[auto-kill] Process stuck at 100% for >{MAX_STALE_100_SECS}s — terminating")
+                    proc.kill()
+                    proc.wait()
+                    rc = 0  # Transfer was complete
+                    return rc, "\n".join(output_lines)
+
             proc.wait()
             rc = proc.returncode
         except FileNotFoundError:

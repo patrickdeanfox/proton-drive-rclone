@@ -128,6 +128,29 @@ const SyncManager = {
                         };
                         this.updateGlobalIndicator(this._activeSyncs);
                     }
+                } else if (event === 'sync_started' && data.config_id) {
+                    // Immediately show sync as running
+                    this._activeSyncs[data.config_id] = {
+                        running: true,
+                        success: null,
+                        name: data.name || data.config_id,
+                        progress: {},
+                        ...this._activeSyncs[data.config_id],
+                    };
+                    this.updateGlobalIndicator(this._activeSyncs);
+                } else if (event === 'sync_completed' && data.config_id) {
+                    // Immediately mark sync as done (works for both early and final completion)
+                    if (this._activeSyncs[data.config_id]) {
+                        this._activeSyncs[data.config_id].running = false;
+                        this._activeSyncs[data.config_id].success = data.success;
+                        this._activeSyncs[data.config_id].progress = {
+                            ...this._activeSyncs[data.config_id].progress,
+                            percent: 100,
+                        };
+                    }
+                    this.updateGlobalIndicator(this._activeSyncs);
+                    // Trigger an immediate poll to refresh full state
+                    setTimeout(() => this.poll(), 500);
                 }
             });
         }
@@ -157,10 +180,27 @@ const SyncManager = {
         if (!indicator) return;
 
         if (running.length === 0) {
-            indicator.style.display = 'none';
+            // Check if any just completed (show briefly)
+            const justCompleted = Object.entries(syncs).filter(([_, s]) => !s.running && s.success !== null);
+            if (justCompleted.length > 0) {
+                const [_, last] = justCompleted[justCompleted.length - 1];
+                indicator.style.display = 'flex';
+                indicator.innerHTML = `
+                    <div class="global-sync-icon"><i class="fas fa-${last.success ? 'check-circle' : 'times-circle'}" style="color:${last.success ? 'var(--success)' : 'var(--danger)'}"></i></div>
+                    <div class="global-sync-info">
+                        <div class="global-sync-name">${escHtml(last.name || 'Sync')} — ${last.success ? 'Complete' : 'Failed'}</div>
+                    </div>
+                `;
+                // Auto-hide after 5 seconds
+                clearTimeout(this._hideTimer);
+                this._hideTimer = setTimeout(() => { indicator.style.display = 'none'; }, 5000);
+            } else {
+                indicator.style.display = 'none';
+            }
             return;
         }
 
+        clearTimeout(this._hideTimer);
         indicator.style.display = 'flex';
         const [configId, syncInfo] = running[0];
         const pct = syncInfo.progress?.percent || 0;
