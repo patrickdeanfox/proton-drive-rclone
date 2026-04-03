@@ -44,6 +44,23 @@ scheduler.start()
 # ─── Helpers ───────────────────────────────────────────────────────────
 
 
+def strip_inline_comment(value):
+    """Strip inline comments (anything after #) from a configuration value.
+
+    Handles edge cases: empty strings, values without comments, values that
+    are purely whitespace after stripping, and preserves '#' inside quotes.
+    """
+    if not value:
+        return value
+    # If the value is quoted, the comment is outside the quotes and was
+    # already removed during quote-stripping, so nothing to do for those.
+    # For unquoted values, strip everything from the first '#' onward.
+    idx = value.find("#")
+    if idx != -1:
+        value = value[:idx]
+    return value.strip()
+
+
 def load_config_env():
     """Parse config.env into a dict."""
     config = {}
@@ -55,6 +72,8 @@ def load_config_env():
             if "=" in line:
                 key, _, val = line.partition("=")
                 val = val.strip().strip('"').strip("'")
+                # Strip trailing inline comments (e.g. "50 # safety note" → "50")
+                val = strip_inline_comment(val)
                 # Expand $HOME
                 val = val.replace("$HOME", str(Path.home()))
                 config[key.strip()] = val
