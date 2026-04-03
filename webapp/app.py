@@ -141,11 +141,100 @@ def record_sync(job_id, job_name, success, message=""):
             sync_history.pop()
 
 
-# ─── Scheduled Sync Execution ─────────────────────────────────────────
+# ─── Live Sync Progress Tracking ──────────────────────────────────────
+
+active_syncs = {}          # config_id → {lines, done, success, started_at}
+active_syncs_lock = threading.Lock()
+
+
+def _build_rclone_bisync_args(local_path, remote_full, env_config, resync=False):
+    """Build rclone bisync args applying the same logic as sync.sh."""
+    args = ["bisync", local_path, remote_full]
+    args += ["--log-level", env_config.get("LOG_LEVEL", "INFO")]
+    args += ["--checkers", str(env_config.get("SYNC_CHECKERS", "8"))]
+    args += ["--transfers", str(env_config.get("SYNC_TRANSFERS", "4"))]
+
+    for pat in env_config.get("SYNC_EXCLUDE_PATTERNS", "").split(","):
+        pat = pat.strip()
+        if pat:
+            args += ["--exclude", pat]
+
+    policy = env_config.get("SYNC_CONFLICT_POLICY", "newer")
+    if policy in ("newer", "larger"):
+        args += ["--conflict-resolve", policy]
+    # skip → omit flag (rclone default: create conflict copies)
+
+    max_del = env_config.get("SYNC_MAX_DELETE_PCT", "50")
+    args += ["--max-delete", str(max_del)]
+
+    if resync:
+        args.append("--resync")
+
+    return args
+
+
+def _run_rclone_streaming(config_id, rclone_args):
+    """Run rclone, stream output line-by-line into active_syncs, retry on resync error."""
+    env_config = load_config_env()
+    configs = load_json(SYNC_CONFIGS_FILE, [])
+    config = next((c for c in configs if c["id"] == config_id), None)
+    job_name = config.get("name", config_id) if config else config_id
+
+    def _append(line):
+        with active_syncs_lock:
+            active_syncs[config_id]["lines"].append(line)
+
+    def _run(args):
+        rc = 0
+        output_lines = []
+        try:
+            proc = subprocess.Popen(
+                ["rclone"] + args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                env={**os.environ, "HOME": str(Path.home())},
+            )
+            for line in proc.stdout:
+                line = line.rstrip()
+                _append(line)
+                output_lines.append(line)
+            proc.wait()
+            rc = proc.returncode
+        except FileNotFoundError:
+            _append("ERROR: rclone not found. Please install rclone.")
+            rc = 1
+        except Exception as e:
+            _append(f"ERROR: {e}")
+            rc = 1
+        return rc, "\n".join(output_lines)
+
+    _append(f"[{datetime.now().strftime('%H:%M:%S')}] Starting sync...")
+    rc, output = _run(rclone_args)
+
+    # Bisync first-run retry: if it failed asking for --resync, retry once
+    if rc != 0 and "--resync" not in rclone_args:
+        needs_resync = any(
+            kw in output.lower()
+            for kw in ("bisync requires", "requires --resync", "must.*resync")
+        )
+        if needs_resync:
+            _append("[auto-retry] Bisync requires --resync — retrying...")
+            rc, output = _run(rclone_args + ["--resync"])
+
+    success = rc == 0
+    _append(f"[{datetime.now().strftime('%H:%M:%S')}] {'Sync completed.' if success else f'Sync failed (exit {rc}).'}")
+
+    with active_syncs_lock:
+        active_syncs[config_id]["done"] = True
+        active_syncs[config_id]["success"] = success
+
+    record_sync(config_id, job_name, success, output[-500:] if output else "")
 
 
 def execute_sync_job(job_id):
-    """Execute a sync job by its ID."""
+    """Execute a sync job (used by scheduler). Runs in the calling thread."""
     configs = load_json(SYNC_CONFIGS_FILE, [])
     config = next((c for c in configs if c["id"] == job_id), None)
     if not config:
@@ -164,27 +253,34 @@ def execute_sync_job(job_id):
 
     remote_full = f"{remote}:{remote_path}" if remote_path else f"{remote}:"
 
-    args = []
+    with active_syncs_lock:
+        active_syncs[job_id] = {
+            "lines": [], "done": False, "success": None,
+            "started_at": datetime.now().isoformat(),
+            "name": config.get("name", job_id),
+        }
+
     if direction == "bisync":
-        args = ["bisync", local_path, remote_full, "--resync", "--force"]
+        # First-run detection: check bisync state dir for this remote
+        state_dir = Path.home() / ".cache" / "rclone" / "bisync"
+        needs_resync = False
+        if not state_dir.exists():
+            needs_resync = True
+        elif not any(
+            remote in str(f) for f in state_dir.glob("*.lst")
+        ):
+            needs_resync = True
+        args = _build_rclone_bisync_args(local_path, remote_full, env_config, resync=needs_resync)
     elif direction == "push":
-        args = ["sync", local_path, remote_full]
-    elif direction == "pull":
-        args = ["sync", remote_full, local_path]
-    else:
-        args = ["bisync", local_path, remote_full, "--resync", "--force"]
+        args = ["sync", local_path, remote_full,
+                "--log-level", env_config.get("LOG_LEVEL", "INFO"),
+                "--transfers", str(env_config.get("SYNC_TRANSFERS", "4"))]
+    else:  # pull
+        args = ["sync", remote_full, local_path,
+                "--log-level", env_config.get("LOG_LEVEL", "INFO"),
+                "--transfers", str(env_config.get("SYNC_TRANSFERS", "4"))]
 
-    # Add common flags
-    exclude_patterns = env_config.get("SYNC_EXCLUDE_PATTERNS", "")
-    if exclude_patterns:
-        for pat in exclude_patterns.split(","):
-            pat = pat.strip()
-            if pat:
-                args.extend(["--exclude", pat])
-
-    success, stdout, stderr = run_rclone_cmd(args, timeout=300)
-    message = stdout if success else (stderr or stdout)
-    record_sync(job_id, config.get("name", ""), success, message)
+    _run_rclone_streaming(job_id, args)
 
 
 # ─── Schedule Management ──────────────────────────────────────────────
@@ -271,6 +367,11 @@ def connection_page():
 @app.route("/settings")
 def settings_page():
     return render_template("settings.html")
+
+
+@app.route("/logs")
+def logs_page():
+    return render_template("logs.html")
 
 
 # ─── Routes: API — Status ─────────────────────────────────────────────
@@ -413,9 +514,30 @@ def api_delete_sync_config(config_id):
 @app.route("/api/sync-configs/<config_id>/run", methods=["POST"])
 def api_run_sync(config_id):
     """Trigger an immediate sync for a config."""
-    thread = threading.Thread(target=execute_sync_job, args=(config_id,))
+    with active_syncs_lock:
+        if config_id in active_syncs and not active_syncs[config_id].get("done", True):
+            return jsonify({"success": False, "message": "Sync already running"})
+    thread = threading.Thread(target=execute_sync_job, args=(config_id,), daemon=True)
     thread.start()
     return jsonify({"success": True, "message": "Sync started"})
+
+
+@app.route("/api/sync-configs/<config_id>/status")
+def api_sync_status(config_id):
+    """Poll live sync progress. Pass ?since=N to get only lines after index N."""
+    since = int(request.args.get("since", 0))
+    with active_syncs_lock:
+        if config_id not in active_syncs:
+            return jsonify({"running": False, "lines": [], "total": 0, "success": None})
+        info = active_syncs[config_id]
+        return jsonify({
+            "running": not info["done"],
+            "lines": info["lines"][since:],
+            "total": len(info["lines"]),
+            "success": info["success"],
+            "started_at": info.get("started_at"),
+            "name": info.get("name", config_id),
+        })
 
 
 # ─── Routes: API — Schedules ──────────────────────────────────────────
@@ -820,6 +942,37 @@ def api_unmount():
 def api_health_check():
     success, stdout, stderr = run_script("health.sh", timeout=30)
     return jsonify({"success": success, "output": stdout + stderr})
+
+
+# ─── Routes: API — Logs ───────────────────────────────────────────────
+
+
+@app.route("/api/logs")
+def api_get_logs():
+    """Return the last N lines of sync.log."""
+    lines = int(request.args.get("lines", 200))
+    log_file = LOG_DIR / "sync.log"
+    if not log_file.exists():
+        return jsonify({"lines": [], "path": str(log_file), "exists": False})
+    try:
+        # Efficient tail without reading the whole file
+        result = subprocess.run(
+            ["tail", "-n", str(lines), str(log_file)],
+            capture_output=True, text=True, timeout=5
+        )
+        content = result.stdout.splitlines()
+    except Exception:
+        content = log_file.read_text().splitlines()[-lines:]
+    return jsonify({"lines": content, "path": str(log_file), "exists": True})
+
+
+@app.route("/api/logs/clear", methods=["POST"])
+def api_clear_logs():
+    """Truncate sync.log."""
+    log_file = LOG_DIR / "sync.log"
+    if log_file.exists():
+        log_file.write_text("")
+    return jsonify({"success": True})
 
 
 # ─── Startup ───────────────────────────────────────────────────────────
