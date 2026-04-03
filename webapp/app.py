@@ -5,6 +5,7 @@ A local web-based UI for managing rclone syncs with Proton Drive.
 """
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -18,6 +19,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from flask import Flask, jsonify, render_template, request
+
+logger = logging.getLogger(__name__)
 
 # ─── Configuration ─────────────────────────────────────────────────────
 
@@ -38,6 +41,78 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 app = Flask(__name__)
 scheduler = BackgroundScheduler(daemon=True)
 scheduler.start()
+
+# ─── Security Helpers ────────────────────────────────────────────────────
+
+# Allowlist of safe rclone subcommands used by this app
+_SAFE_RCLONE_CMDS = frozenset({
+    "version", "listremotes", "lsd", "lsjson", "about",
+    "config", "bisync", "sync",
+})
+
+# Allowlist of scripts that can be executed
+_SAFE_SCRIPTS = frozenset({"mount.sh", "unmount.sh", "health.sh"})
+
+# Minimal environment for subprocesses — avoids leaking secrets
+def _safe_env():
+    """Build a minimal environment for child processes."""
+    keep = {"PATH", "HOME", "USER", "LANG", "LC_ALL", "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME", "XDG_CACHE_HOME", "TMPDIR", "TZ"}
+    env = {k: v for k, v in os.environ.items() if k in keep}
+    env.setdefault("HOME", str(Path.home()))
+    env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    return env
+
+
+def _sanitize_path(path_str):
+    """Resolve a path and ensure it doesn't escape via traversal.
+
+    Returns the resolved absolute path string, or None if invalid.
+    """
+    if not path_str:
+        return None
+    expanded = os.path.expanduser(path_str)
+    resolved = os.path.realpath(expanded)
+    # Block obvious dangerous targets
+    blocked = ("/proc", "/sys", "/dev", "/boot", "/sbin")
+    for prefix in blocked:
+        if resolved == prefix or resolved.startswith(prefix + "/"):
+            return None
+    return resolved
+
+
+# File lock for atomic config file operations
+_config_file_lock = threading.Lock()
+
+
+def _validate_cron_expression(expr):
+    """Basic validation of cron expressions — 5 fields, safe characters."""
+    if not expr:
+        return False
+    parts = expr.strip().split()
+    if len(parts) != 5:
+        return False
+    # Only allow digits, *, /, -, commas
+    if not re.match(r'^[\d\s\*\/\-\,]+$', expr):
+        return False
+    return True
+
+
+def _validate_remote_name(name):
+    """Validate rclone remote name — alphanumeric, dash, underscore only."""
+    return bool(re.match(r'^[A-Za-z0-9_-]+$', name))
+
+
+def _validate_path_component(path_str):
+    """Validate a remote path component — no shell metacharacters."""
+    if not path_str:
+        return True  # empty is valid (root)
+    # Reject null bytes and shell metacharacters
+    if '\0' in path_str:
+        return False
+    dangerous = set(';&|`$(){}[]!#~')
+    return not any(c in dangerous for c in path_str)
+
 
 # ─── Helpers ───────────────────────────────────────────────────────────
 
@@ -83,12 +158,15 @@ def save_json(path, data):
 
 def run_rclone_cmd(args, timeout=60):
     """Run an rclone command and return (success, stdout, stderr)."""
+    if args and args[0] not in _SAFE_RCLONE_CMDS:
+        return False, "", f"Disallowed rclone subcommand: {args[0]}"
     try:
         result = subprocess.run(
             ["rclone"] + args,
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=_safe_env(),
         )
         return result.returncode == 0, result.stdout, result.stderr
     except FileNotFoundError:
@@ -98,7 +176,9 @@ def run_rclone_cmd(args, timeout=60):
 
 
 def run_script(script_name, args=None, timeout=120):
-    """Run one of the existing bash scripts."""
+    """Run one of the allowlisted bash scripts."""
+    if script_name not in _SAFE_SCRIPTS:
+        return False, "", f"Script not allowed: {script_name}"
     script_path = SCRIPTS_DIR / script_name
     if not script_path.exists():
         return False, "", f"Script not found: {script_path}"
@@ -109,7 +189,7 @@ def run_script(script_name, args=None, timeout=120):
             capture_output=True,
             text=True,
             timeout=timeout,
-            env={**os.environ, "HOME": str(Path.home())},
+            env=_safe_env(),
         )
         return result.returncode == 0, result.stdout, result.stderr
     except subprocess.TimeoutExpired:
@@ -205,7 +285,7 @@ def _run_rclone_streaming(config_id, rclone_args):
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                env={**os.environ, "HOME": str(Path.home())},
+                env=_safe_env(),
             )
             for line in proc.stdout:
                 line = line.rstrip()
@@ -430,9 +510,18 @@ def api_status():
     local_size = "N/A"
     if os.path.isdir(sync_dir):
         try:
-            local_files = sum(1 for _ in Path(sync_dir).rglob("*") if _.is_file())
+            # Cap file count to avoid blocking on huge directories
+            count = 0
+            for _ in Path(sync_dir).rglob("*"):
+                if _.is_file():
+                    count += 1
+                if count >= 50000:
+                    break
+            local_files = count
             result = subprocess.run(
-                ["du", "-sh", sync_dir], capture_output=True, text=True, timeout=10
+                ["du", "-sh", "--max-depth=0", sync_dir],
+                capture_output=True, text=True, timeout=10,
+                env=_safe_env(),
             )
             if result.returncode == 0:
                 local_size = result.stdout.split()[0]
@@ -470,14 +559,32 @@ def api_get_sync_configs():
 @app.route("/api/sync-configs", methods=["POST"])
 def api_create_sync_config():
     data = request.json
+    if not data:
+        return jsonify({"error": "Request body required"}), 400
+
+    local_path = data.get("local_path", "").strip()
+    remote_path = data.get("remote_path", "").strip()
+    direction = data.get("direction", "bisync")
+    name = data.get("name", "Untitled").strip()[:100]
+
+    if not local_path:
+        return jsonify({"error": "local_path is required"}), 400
+    safe_local = _sanitize_path(local_path)
+    if safe_local is None:
+        return jsonify({"error": "Invalid local path"}), 400
+    if not _validate_path_component(remote_path):
+        return jsonify({"error": "Invalid remote path"}), 400
+    if direction not in ("bisync", "push", "pull"):
+        return jsonify({"error": "Invalid direction"}), 400
+
     configs = load_json(SYNC_CONFIGS_FILE, [])
     new_config = {
         "id": str(uuid.uuid4())[:8],
-        "name": data.get("name", "Untitled"),
-        "local_path": data.get("local_path", ""),
-        "remote_path": data.get("remote_path", ""),
-        "direction": data.get("direction", "bisync"),
-        "exclude_patterns": data.get("exclude_patterns", ""),
+        "name": name,
+        "local_path": safe_local,
+        "remote_path": remote_path,
+        "direction": direction,
+        "exclude_patterns": data.get("exclude_patterns", "").strip()[:500],
         "created_at": datetime.now().isoformat(),
         "enabled": True,
     }
@@ -489,18 +596,35 @@ def api_create_sync_config():
 @app.route("/api/sync-configs/<config_id>", methods=["PUT"])
 def api_update_sync_config(config_id):
     data = request.json
+    if not data:
+        return jsonify({"error": "Request body required"}), 400
+
+    local_path = data.get("local_path", "").strip()
+    remote_path = data.get("remote_path", "").strip()
+    direction = data.get("direction", "")
+
+    if local_path:
+        safe_local = _sanitize_path(local_path)
+        if safe_local is None:
+            return jsonify({"error": "Invalid local path"}), 400
+        local_path = safe_local
+    if remote_path and not _validate_path_component(remote_path):
+        return jsonify({"error": "Invalid remote path"}), 400
+    if direction and direction not in ("bisync", "push", "pull"):
+        return jsonify({"error": "Invalid direction"}), 400
+
     configs = load_json(SYNC_CONFIGS_FILE, [])
     for cfg in configs:
         if cfg["id"] == config_id:
             cfg.update(
                 {
-                    "name": data.get("name", cfg["name"]),
-                    "local_path": data.get("local_path", cfg["local_path"]),
-                    "remote_path": data.get("remote_path", cfg["remote_path"]),
-                    "direction": data.get("direction", cfg["direction"]),
+                    "name": data.get("name", cfg["name"])[:100],
+                    "local_path": local_path or cfg["local_path"],
+                    "remote_path": remote_path if "remote_path" in data else cfg["remote_path"],
+                    "direction": direction or cfg["direction"],
                     "exclude_patterns": data.get(
                         "exclude_patterns", cfg.get("exclude_patterns", "")
-                    ),
+                    )[:500],
                     "enabled": data.get("enabled", cfg.get("enabled", True)),
                 }
             )
@@ -554,7 +678,10 @@ def api_run_sync(config_id):
 @app.route("/api/sync-configs/<config_id>/status")
 def api_sync_status(config_id):
     """Poll live sync progress. Pass ?since=N to get only lines after index N."""
-    since = int(request.args.get("since", 0))
+    try:
+        since = max(0, int(request.args.get("since", 0)))
+    except (ValueError, TypeError):
+        since = 0
     with active_syncs_lock:
         if config_id not in active_syncs:
             return jsonify({"running": False, "lines": [], "total": 0, "success": None})
@@ -588,15 +715,43 @@ def api_get_schedules():
 @app.route("/api/schedules", methods=["POST"])
 def api_create_schedule():
     data = request.json
+    if not data:
+        return jsonify({"error": "Request body required"}), 400
+
+    stype = data.get("schedule_type", "interval")
+    if stype not in ("interval", "daily", "cron"):
+        return jsonify({"error": "Invalid schedule_type"}), 400
+
+    config_id = data.get("config_id", "")
+    if not config_id:
+        return jsonify({"error": "config_id is required"}), 400
+
+    # Validate interval bounds
+    interval_minutes = data.get("interval_minutes", 30)
+    try:
+        interval_minutes = max(1, min(int(interval_minutes), 10080))  # 1 min to 1 week
+    except (ValueError, TypeError):
+        interval_minutes = 30
+
+    # Validate cron expression
+    cron_expression = data.get("cron_expression", "0 * * * *")
+    if stype == "cron" and not _validate_cron_expression(cron_expression):
+        return jsonify({"error": "Invalid cron expression (expected 5 fields)"}), 400
+
+    # Validate daily time
+    daily_time = data.get("daily_time", "02:00")
+    if stype == "daily" and not re.match(r'^\d{1,2}:\d{2}$', daily_time):
+        return jsonify({"error": "Invalid daily_time format (expected HH:MM)"}), 400
+
     schedules = load_json(SCHEDULES_FILE, [])
     new_sched = {
         "id": str(uuid.uuid4())[:8],
-        "name": data.get("name", "Untitled Schedule"),
-        "config_id": data.get("config_id", ""),
-        "schedule_type": data.get("schedule_type", "interval"),
-        "interval_minutes": data.get("interval_minutes", 30),
-        "cron_expression": data.get("cron_expression", "0 * * * *"),
-        "daily_time": data.get("daily_time", "02:00"),
+        "name": data.get("name", "Untitled Schedule")[:100],
+        "config_id": config_id,
+        "schedule_type": stype,
+        "interval_minutes": interval_minutes,
+        "cron_expression": cron_expression,
+        "daily_time": daily_time,
         "enabled": data.get("enabled", True),
         "created_at": datetime.now().isoformat(),
     }
@@ -695,10 +850,12 @@ def api_browse_local():
     if not path:
         path = config.get("SYNC_DIR", str(Path.home()))
 
-    path = os.path.expanduser(path)
+    path = _sanitize_path(path)
+    if path is None:
+        return jsonify({"error": "Invalid or restricted path"}), 400
 
     if not os.path.exists(path):
-        return jsonify({"error": f"Path does not exist: {path}"}), 404
+        return jsonify({"error": "Path does not exist"}), 404
 
     if not os.path.isdir(path):
         return jsonify({"error": "Not a directory"}), 400
@@ -735,8 +892,12 @@ def api_browse_local():
 def api_browse_remote():
     """Browse Proton Drive remote directory via rclone."""
     path = request.args.get("path", "")
+    if not _validate_path_component(path):
+        return jsonify({"error": "Invalid remote path"}), 400
     config = load_config_env()
     remote = config.get("RCLONE_REMOTE", "protondrive")
+    if not _validate_remote_name(remote):
+        return jsonify({"error": "Invalid remote name in config"}), 500
     remote_path = f"{remote}:{path}" if path else f"{remote}:"
 
     success, stdout, stderr = run_rclone_cmd(
@@ -777,7 +938,9 @@ def api_browse_remote():
 def api_local_tree():
     """Get directory tree for folder selection."""
     path = request.args.get("path", str(Path.home()))
-    path = os.path.expanduser(path)
+    path = _sanitize_path(path)
+    if path is None:
+        return jsonify({"error": "Invalid or restricted path"}), 400
 
     if not os.path.isdir(path):
         return jsonify({"error": "Not a directory"}), 400
@@ -797,6 +960,8 @@ def api_local_tree():
 def api_remote_tree():
     """Get remote directory tree for folder selection."""
     path = request.args.get("path", "")
+    if not _validate_path_component(path):
+        return jsonify({"error": "Invalid remote path"}), 400
     config = load_config_env()
     remote = config.get("RCLONE_REMOTE", "protondrive")
     remote_path = f"{remote}:{path}" if path else f"{remote}:"
@@ -835,24 +1000,43 @@ def api_get_config():
     return jsonify(load_config_env())
 
 
+_ALLOWED_CONFIG_KEYS = frozenset({
+    "SYNC_DIR", "MOUNT_DIR", "LOG_DIR", "LOG_LEVEL", "LOG_MAX_SIZE_MB",
+    "LOG_RETAIN_DAYS", "RCLONE_REMOTE", "SYNC_EXCLUDE_PATTERNS",
+    "SYNC_CONFLICT_POLICY", "SYNC_MAX_DELETE_PCT", "SYNC_CHECKERS",
+    "SYNC_TRANSFERS", "SYNC_BANDWIDTH_LIMIT", "MOUNT_EXTRA_FLAGS",
+    "ORGANIZE_ENABLED", "ORGANIZE_ON_SYNC",
+})
+
+
 @app.route("/api/config", methods=["PUT"])
 def api_update_config():
     """Update specific config values."""
     data = request.json
+    if not data:
+        return jsonify({"error": "Request body required"}), 400
     if not CONFIG_FILE.exists():
         return jsonify({"error": "Config file not found"}), 404
 
-    content = CONFIG_FILE.read_text()
-    for key, val in data.items():
-        pattern = rf'^{re.escape(key)}=.*$'
-        replacement = f'{key}="{val}"'
-        new_content, count = re.subn(pattern, replacement, content, flags=re.MULTILINE)
-        if count > 0:
-            content = new_content
-        else:
-            content += f'\n{key}="{val}"'
+    # Validate keys against allowlist and sanitize values
+    for key in data:
+        if key not in _ALLOWED_CONFIG_KEYS:
+            return jsonify({"error": f"Config key not allowed: {key}"}), 400
 
-    CONFIG_FILE.write_text(content)
+    with _config_file_lock:
+        content = CONFIG_FILE.read_text()
+        for key, val in data.items():
+            # Strip newlines and quotes from values to prevent config injection
+            val = str(val).replace('\n', '').replace('\r', '').replace('"', '')
+            pattern = rf'^{re.escape(key)}=.*$'
+            replacement = f'{key}="{val}"'
+            new_content, count = re.subn(pattern, replacement, content, flags=re.MULTILINE)
+            if count > 0:
+                content = new_content
+            else:
+                content += f'\n{key}="{val}"'
+
+        CONFIG_FILE.write_text(content)
     return jsonify({"success": True})
 
 
@@ -909,10 +1093,9 @@ def api_list_remotes():
 
 @app.route("/api/remotes/<name>/test", methods=["POST"])
 def api_test_remote(name):
-    """Test connectivity to a remote.
-    Uses rclone's own --contimeout / --timeout so we get a clear error
-    message rather than a subprocess timeout killing it silently.
-    """
+    """Test connectivity to a remote."""
+    if not _validate_remote_name(name):
+        return jsonify({"success": False, "error": "Invalid remote name"}), 400
     success, _, stderr = run_rclone_cmd(
         ["lsd", f"{name}:", "--max-depth", "0",
          "--contimeout", "15s", "--timeout", "30s"],
@@ -924,6 +1107,8 @@ def api_test_remote(name):
 @app.route("/api/remotes/<name>/about")
 def api_remote_about(name):
     """Get quota and usage info for a remote via `rclone about --json`."""
+    if not _validate_remote_name(name):
+        return jsonify({"success": False, "error": "Invalid remote name"}), 400
     success, stdout, stderr = run_rclone_cmd(
         ["about", f"{name}:", "--json"], timeout=20
     )
@@ -938,6 +1123,8 @@ def api_remote_about(name):
 @app.route("/api/remotes/<name>/config")
 def api_remote_config(name):
     """Return sanitized config fields for a remote (secrets hidden)."""
+    if not _validate_remote_name(name):
+        return jsonify({"error": "Invalid remote name"}), 400
     success, stdout, stderr = run_rclone_cmd(["config", "show", name], timeout=10)
     if not success:
         return jsonify({"error": stderr or "Remote not found"}), 404
@@ -947,13 +1134,16 @@ def api_remote_config(name):
 @app.route("/api/remotes/<name>/set-active", methods=["POST"])
 def api_set_active_remote(name):
     """Set RCLONE_REMOTE in config.env to the given remote name."""
+    if not _validate_remote_name(name):
+        return jsonify({"error": "Invalid remote name"}), 400
     if not CONFIG_FILE.exists():
         return jsonify({"error": "Config file not found. Run the installer first."}), 404
-    content = CONFIG_FILE.read_text()
-    pattern = r'^RCLONE_REMOTE=.*$'
-    replacement = f'RCLONE_REMOTE="{name}"'
-    new_content, count = re.subn(pattern, replacement, content, flags=re.MULTILINE)
-    CONFIG_FILE.write_text(new_content if count > 0 else content + f'\n{replacement}')
+    with _config_file_lock:
+        content = CONFIG_FILE.read_text()
+        pattern = r'^RCLONE_REMOTE=.*$'
+        replacement = f'RCLONE_REMOTE="{name}"'
+        new_content, count = re.subn(pattern, replacement, content, flags=re.MULTILINE)
+        CONFIG_FILE.write_text(new_content if count > 0 else content + f'\n{replacement}')
     return jsonify({"success": True})
 
 
@@ -984,7 +1174,10 @@ def api_health_check():
 @app.route("/api/logs")
 def api_get_logs():
     """Return the last N lines of sync.log."""
-    lines = int(request.args.get("lines", 200))
+    try:
+        lines = min(int(request.args.get("lines", 200)), 5000)
+    except (ValueError, TypeError):
+        lines = 200
     log_file = LOG_DIR / "sync.log"
     if not log_file.exists():
         return jsonify({"lines": [], "path": str(log_file), "exists": False})
@@ -1018,7 +1211,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 5000)))
-    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--host", default="127.0.0.1")
     args = parser.parse_args()
     print("=" * 60)
     print("  Proton Drive rclone Web Interface")

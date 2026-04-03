@@ -81,7 +81,7 @@ async function loadConnection() {
     const data = await api('/remotes');
 
     if (data.error) {
-        activeEl.innerHTML = `<div class="alert alert-danger">${data.error}</div>`;
+        activeEl.innerHTML = `<div class="alert alert-danger">${escHtml(data.error)}</div>`;
         listEl.innerHTML = '';
         return;
     }
@@ -93,22 +93,22 @@ async function loadConnection() {
             <div class="remote-detail-row">
                 <div class="remote-detail">
                     <span class="detail-label">Remote name</span>
-                    <span class="detail-value mono">${active.name}</span>
+                    <span class="detail-value mono">${escHtml(active.name)}</span>
                 </div>
                 <div class="remote-detail">
                     <span class="detail-label">Type</span>
-                    <span class="detail-value">${active.type}</span>
+                    <span class="detail-value">${escHtml(active.type)}</span>
                 </div>
                 ${active.username ? `<div class="remote-detail">
                     <span class="detail-label">Account</span>
-                    <span class="detail-value">${active.username}</span>
+                    <span class="detail-value">${escHtml(active.username)}</span>
                 </div>` : ''}
             </div>
             <div class="btn-group" style="margin-top:16px">
-                <button class="btn btn-primary btn-sm" onclick="testRemote('${active.name}')">🔗 Test Connection</button>
-                <button class="btn btn-ghost btn-sm" onclick="showConfig('${active.name}')">🔧 View Config</button>
+                <button class="btn btn-primary btn-sm" data-remote="${escHtml(active.name)}" onclick="testRemote(this.dataset.remote)">🔗 Test Connection</button>
+                <button class="btn btn-ghost btn-sm" data-remote="${escHtml(active.name)}" onclick="showConfig(this.dataset.remote)">🔧 View Config</button>
             </div>
-            <div id="test-result-${active.name}" style="margin-top:12px"></div>
+            <div id="test-result-${escHtml(active.name)}" style="margin-top:12px"></div>
         `;
         // Update reconfigure command to use the actual remote name
         document.getElementById('reconfigure-cmd').textContent = `rclone config reconnect ${active.name}:`;
@@ -130,17 +130,17 @@ async function loadConnection() {
             <tbody>
                 ${data.remotes.map(r => `
                 <tr>
-                    <td><span class="mono">${r.name}</span></td>
-                    <td>${r.type}</td>
-                    <td>${r.username || '<span class="text-muted">—</span>'}</td>
+                    <td><span class="mono">${escHtml(r.name)}</span></td>
+                    <td>${escHtml(r.type)}</td>
+                    <td>${r.username ? escHtml(r.username) : '<span class="text-muted">—</span>'}</td>
                     <td>
                         ${r.is_active
                             ? '<span class="badge badge-success">Active</span>'
-                            : `<button class="btn btn-ghost btn-xs" onclick="setActive('${r.name}')">Set Active</button>`}
+                            : `<button class="btn btn-ghost btn-xs" data-remote="${escHtml(r.name)}" onclick="setActive(this.dataset.remote)">Set Active</button>`}
                     </td>
                     <td>
-                        <button class="btn btn-ghost btn-xs" onclick="testRemote('${r.name}')">Test</button>
-                        <button class="btn btn-ghost btn-xs" onclick="showConfig('${r.name}')">Config</button>
+                        <button class="btn btn-ghost btn-xs" data-remote="${escHtml(r.name)}" onclick="testRemote(this.dataset.remote)">Test</button>
+                        <button class="btn btn-ghost btn-xs" data-remote="${escHtml(r.name)}" onclick="showConfig(this.dataset.remote)">Config</button>
                     </td>
                 </tr>
                 `).join('')}
@@ -158,7 +158,7 @@ async function testRemote(name) {
         resultEl.innerHTML = '<span class="badge badge-success">Connected successfully</span>';
         showToast(`${name}: connected`, 'success');
     } else {
-        resultEl.innerHTML = `<span class="badge badge-danger">Failed: ${data.error}</span>`;
+        resultEl.innerHTML = `<span class="badge badge-danger">Failed: ${escHtml(data.error)}</span>`;
         showToast(`${name}: connection failed`, 'error');
     }
 }
@@ -192,12 +192,12 @@ async function showConfig(name) {
 
     const data = await api(`/remotes/${encodeURIComponent(name)}/config`);
     if (data.error) {
-        content.innerHTML = `<div class="alert alert-danger">${data.error}</div>`;
+        content.innerHTML = `<div class="alert alert-danger">${escHtml(data.error)}</div>`;
         return;
     }
     const rows = Object.entries(data.fields).map(([k, v]) =>
-        `<tr><td class="mono" style="color:var(--text-secondary);padding:6px 12px">${k}</td>
-             <td class="mono" style="padding:6px 12px">${v}</td></tr>`
+        `<tr><td class="mono" style="color:var(--text-secondary);padding:6px 12px">${escHtml(k)}</td>
+             <td class="mono" style="padding:6px 12px">${escHtml(v)}</td></tr>`
     ).join('');
     content.innerHTML = `<table style="width:100%;border-collapse:collapse">${rows}</table>`;
 }

@@ -5,7 +5,9 @@ set -euo pipefail
 source "$HOME/.config/protondrive-linux/config.env"
 
 LOG_FILE="$LOG_DIR/sync.log"
-LOCK_FILE="/tmp/protondrive-sync.lock"
+LOCK_DIR="${XDG_RUNTIME_DIR:-$HOME/.cache/protondrive-linux}"
+mkdir -p "$LOCK_DIR"
+LOCK_FILE="$LOCK_DIR/protondrive-sync.lock"
 
 DRY_RUN=false
 FORCE=false
@@ -45,7 +47,7 @@ acquire_lock() {
             rm -f "$LOCK_FILE"
         fi
     fi
-    echo $$ > "$LOCK_FILE"
+    printf '%s\n' "$$" > "$LOCK_FILE"
     trap 'rm -f "$LOCK_FILE"' EXIT
 }
 
@@ -136,7 +138,7 @@ main() {
         if ! $RESYNC && [[ -d "$bisync_state_dir" ]]; then
             # State files are named with a hash that encodes both paths; check
             # whether any listing file references the current remote
-            if ! ls "$bisync_state_dir"/*.lst 2>/dev/null | xargs grep -ql "$RCLONE_REMOTE" 2>/dev/null; then
+            if ! find "$bisync_state_dir" -maxdepth 1 -name '*.lst' -print0 2>/dev/null | xargs -0 grep -ql "$RCLONE_REMOTE" 2>/dev/null; then
                 log "No bisync state found for $RCLONE_REMOTE — adding --resync"
                 flags+=(--resync)
             fi
