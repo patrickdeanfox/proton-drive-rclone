@@ -1,0 +1,156 @@
+{% extends 'base.html' %}
+{% set active = 'settings' %}
+{% block title %}Settings — Proton Drive Manager{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h2>Settings</h2>
+    <p>Edit your protondrive-linux configuration.</p>
+</div>
+
+<!-- Sync Settings -->
+<div class="card">
+    <div class="card-header">
+        <h3>🔄 Sync</h3>
+    </div>
+    <div class="settings-grid" id="sync-settings">
+        <div class="loading-overlay"><span class="spinner"></span></div>
+    </div>
+</div>
+
+<!-- Mount Settings -->
+<div class="card">
+    <div class="card-header">
+        <h3>💿 Mount</h3>
+    </div>
+    <div class="settings-grid" id="mount-settings">
+        <div class="loading-overlay"><span class="spinner"></span></div>
+    </div>
+</div>
+
+<!-- Paths -->
+<div class="card">
+    <div class="card-header">
+        <h3>📁 Paths</h3>
+    </div>
+    <div class="settings-grid" id="path-settings">
+        <div class="loading-overlay"><span class="spinner"></span></div>
+    </div>
+</div>
+
+<!-- Logging -->
+<div class="card">
+    <div class="card-header">
+        <h3>📋 Logging</h3>
+    </div>
+    <div class="settings-grid" id="log-settings">
+        <div class="loading-overlay"><span class="spinner"></span></div>
+    </div>
+</div>
+
+<!-- Save -->
+<div style="display:flex;gap:12px;justify-content:flex-end;margin-bottom:32px">
+    <button class="btn btn-ghost" onclick="loadSettings()">↩ Discard Changes</button>
+    <button class="btn btn-primary" onclick="saveSettings()">💾 Save All Settings</button>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Settings schema: key → { label, type, hint, options }
+const SETTINGS_SCHEMA = {
+    sync: [
+        { key: 'SYNC_DIR',              label: 'Sync Directory',         type: 'text',   hint: 'Local folder to bisync with Proton Drive' },
+        { key: 'SYNC_CONFLICT_POLICY',  label: 'Conflict Policy',        type: 'select', options: ['newer','larger','skip'], hint: 'How to resolve conflicts between local and remote' },
+        { key: 'SYNC_EXCLUDE_PATTERNS', label: 'Exclude Patterns',       type: 'text',   hint: 'Comma-separated globs to skip (e.g. *.tmp, .DS_Store)' },
+        { key: 'SYNC_MAX_DELETE_PCT',   label: 'Max Delete %',           type: 'number', hint: 'Abort bisync if more than this % of files would be deleted (1–100)' },
+        { key: 'SYNC_CHECKERS',         label: 'Checkers',               type: 'number', hint: 'Parallel file-checking goroutines' },
+        { key: 'SYNC_TRANSFERS',        label: 'Transfers',              type: 'number', hint: 'Parallel file-transfer goroutines' },
+        { key: 'SYNC_INTERVAL_MIN',     label: 'Sync Interval (min)',    type: 'number', hint: 'How often the systemd timer triggers a sync' },
+    ],
+    mount: [
+        { key: 'MOUNT_DIR',            label: 'Mount Directory',         type: 'text',   hint: 'Where to mount Proton Drive as a local folder' },
+        { key: 'VFS_CACHE_MODE',       label: 'VFS Cache Mode',          type: 'select', options: ['off','minimal','writes','full'], hint: '"full" gives best compatibility; "off" uses no local disk cache' },
+        { key: 'VFS_CACHE_MAX_AGE',    label: 'VFS Cache Max Age',       type: 'text',   hint: 'How long to keep cached files (e.g. 1h, 30m)' },
+        { key: 'VFS_CACHE_MAX_SIZE',   label: 'VFS Cache Max Size',      type: 'text',   hint: 'Max disk space for VFS cache (e.g. 10G, 2G)' },
+        { key: 'DIR_CACHE_TIME',       label: 'Dir Cache Time',          type: 'text',   hint: 'How long to cache directory listings (e.g. 5m)' },
+        { key: 'POLL_INTERVAL',        label: 'Poll Interval',           type: 'text',   hint: 'How often to poll for remote changes when mounted (e.g. 30s)' },
+        { key: 'VFS_READ_AHEAD',       label: 'Read Ahead',              type: 'text',   hint: 'Read-ahead buffer size (e.g. 128M)' },
+        { key: 'BUFFER_SIZE',          label: 'Buffer Size',             type: 'text',   hint: 'In-memory buffer for file transfers (e.g. 64M)' },
+    ],
+    path: [
+        { key: 'LOG_DIR',              label: 'Log Directory',           type: 'text',   hint: 'Where log files are stored' },
+    ],
+    log: [
+        { key: 'LOG_LEVEL',            label: 'Log Level',               type: 'select', options: ['DEBUG','INFO','NOTICE','WARNING','ERROR'], hint: 'rclone log verbosity' },
+        { key: 'LOG_MAX_SIZE_MB',      label: 'Max Log Size (MB)',        type: 'number', hint: 'Rotate logs when they exceed this size' },
+        { key: 'LOG_RETAIN_DAYS',      label: 'Log Retain Days',         type: 'number', hint: 'Delete rotated logs older than this many days' },
+    ],
+};
+
+let currentConfig = {};
+let pendingChanges = {};
+
+function renderSettingsGroup(containerId, fields, config) {
+    const el = document.getElementById(containerId);
+    el.innerHTML = fields.map(f => {
+        const val = config[f.key] ?? '';
+        let input;
+        if (f.type === 'select') {
+            const opts = f.options.map(o =>
+                `<option value="${o}" ${val === o ? 'selected' : ''}>${o}</option>`
+            ).join('');
+            input = `<select class="setting-input" data-key="${f.key}" onchange="markChanged(this)">${opts}</select>`;
+        } else if (f.type === 'number') {
+            input = `<input type="number" class="setting-input" data-key="${f.key}" value="${val}" oninput="markChanged(this)">`;
+        } else {
+            input = `<input type="text" class="setting-input" data-key="${f.key}" value="${val}" oninput="markChanged(this)">`;
+        }
+        return `
+        <div class="setting-row">
+            <div class="setting-meta">
+                <label class="setting-label">${f.label}</label>
+                <span class="setting-hint">${f.hint}</span>
+            </div>
+            <div class="setting-control">
+                ${input}
+                <span class="setting-key mono">${f.key}</span>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function markChanged(el) {
+    pendingChanges[el.dataset.key] = el.value;
+    el.classList.add('changed');
+}
+
+async function loadSettings() {
+    pendingChanges = {};
+    const config = await api('/config');
+    currentConfig = config;
+    renderSettingsGroup('sync-settings',  SETTINGS_SCHEMA.sync,  config);
+    renderSettingsGroup('mount-settings', SETTINGS_SCHEMA.mount, config);
+    renderSettingsGroup('path-settings',  SETTINGS_SCHEMA.path,  config);
+    renderSettingsGroup('log-settings',   SETTINGS_SCHEMA.log,   config);
+}
+
+async function saveSettings() {
+    if (!Object.keys(pendingChanges).length) {
+        showToast('No changes to save', 'info');
+        return;
+    }
+    const res = await api('/config', { method: 'PUT', body: pendingChanges });
+    if (res.success) {
+        showToast('Settings saved', 'success');
+        pendingChanges = {};
+        document.querySelectorAll('.setting-input.changed').forEach(el => el.classList.remove('changed'));
+    } else {
+        showToast(res.error || 'Failed to save', 'error');
+    }
+}
+
+document.addEventListener('DOMContentLoaded', loadSettings);
+</script>
+{% endblock %}

@@ -1,0 +1,52 @@
+{% extends 'base.html' %}
+{% set active = 'browser' %}
+{% block title %}File Browser — Proton Drive Manager{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h2>File Browser</h2>
+    <p>View and compare files in both your local sync folder and Proton Drive.</p>
+</div>
+
+<div class="browser-layout">
+    <!-- Local Pane -->
+    <div class="browser-pane">
+        <div class="browser-pane-header">
+            <span class="pane-label local">💻 LOCAL</span>
+            <button class="btn btn-sm btn-ghost" onclick="browseLocal('')" style="margin-left:auto">🏠 Home</button>
+            <button class="btn btn-sm btn-ghost" onclick="browseLocal(localBrowserPath)">🔄</button>
+        </div>
+        <div id="local-breadcrumb" class="browser-breadcrumb">/</div>
+        <div id="local-file-list" class="file-list">
+            <div class="loading-overlay"><span class="spinner"></span></div>
+        </div>
+    </div>
+
+    <!-- Remote Pane -->
+    <div class="browser-pane">
+        <div class="browser-pane-header">
+            <span class="pane-label remote">☁️ PROTON DRIVE</span>
+            <button class="btn btn-sm btn-ghost" onclick="browseRemote('')" style="margin-left:auto">🏠 Root</button>
+            <button class="btn btn-sm btn-ghost" onclick="browseRemote(remoteBrowserPath)">🔄</button>
+        </div>
+        <div id="remote-breadcrumb" class="browser-breadcrumb">☁️ /</div>
+        <div id="remote-file-list" class="file-list">
+            <div class="loading-overlay"><span class="spinner"></span></div>
+        </div>
+    </div>
+</div>
+
+<!-- Legend -->
+<div class="card" style="margin-top: 20px;">
+    <div style="font-size: 13px; color: var(--text-secondary); display: flex; gap: 24px; flex-wrap: wrap;">
+        <span>📁 Directory (click to navigate)</span>
+        <span>📄 File</span>
+        <span>🖼️ Image</span>
+        <span>🎬 Video</span>
+        <span>🎵 Audio</span>
+        <span>📦 Archive</span>
+        <span>🐍 Python</span>
+        <span>📜 Script</span>
+    </div>
+</div>
+{% endblock %}

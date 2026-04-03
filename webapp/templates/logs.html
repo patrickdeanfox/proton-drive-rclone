@@ -1,0 +1,129 @@
+{% extends 'base.html' %}
+{% set active = 'logs' %}
+{% block title %}Logs — Proton Drive Manager{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h2>Logs</h2>
+    <p>View rclone sync activity and operation history.</p>
+</div>
+
+<!-- Controls -->
+<div class="card">
+    <div class="card-header">
+        <h3>📋 sync.log</h3>
+        <div style="display:flex;gap:8px;align-items:center">
+            <label style="font-size:13px;color:var(--text-secondary)">Lines:</label>
+            <select id="lines-select" class="setting-input" style="width:90px;padding:5px 8px" onchange="loadLogs()">
+                <option value="100">100</option>
+                <option value="200" selected>200</option>
+                <option value="500">500</option>
+                <option value="1000">1000</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" onclick="loadLogs()">🔄 Refresh</button>
+            <button class="btn btn-ghost btn-sm" id="auto-refresh-btn" onclick="toggleAutoRefresh()">▶ Auto</button>
+            <button class="btn btn-ghost btn-sm" onclick="clearLogs()" style="color:var(--danger)">🗑 Clear</button>
+        </div>
+    </div>
+    <div id="log-path" style="font-size:12px;color:var(--text-muted);margin-bottom:12px;font-family:var(--font-mono)"></div>
+    <div id="log-output" class="log-output" style="height:520px"></div>
+</div>
+
+<!-- Sync History -->
+<div class="card">
+    <div class="card-header">
+        <h3>📜 Recent Sync History</h3>
+        <button class="btn btn-ghost btn-sm" onclick="loadHistory()">🔄 Refresh</button>
+    </div>
+    <div id="history-output">
+        <div class="loading-overlay"><span class="spinner"></span></div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let autoRefreshTimer = null;
+let autoRefreshOn = false;
+
+async function loadLogs() {
+    const lines = document.getElementById('lines-select').value;
+    const el = document.getElementById('log-output');
+    const data = await api(`/logs?lines=${lines}`);
+
+    document.getElementById('log-path').textContent = data.path || '';
+
+    if (!data.exists || !data.lines.length) {
+        el.innerHTML = '<span class="text-muted">No log file found yet. Run a sync first.</span>';
+        return;
+    }
+
+    el.innerHTML = data.lines.map(line => {
+        let cls = 'log-line';
+        const l = line.toLowerCase();
+        if (l.includes('error') || l.includes('✗') || l.includes('failed')) cls += ' log-error';
+        else if (l.includes('warn')) cls += ' log-warn';
+        else if (l.includes('✓') || l.includes('completed') || l.includes('success')) cls += ' log-success';
+        return `<div class="${cls}">${escapeHtml(line)}</div>`;
+    }).join('');
+
+    el.scrollTop = el.scrollHeight;
+}
+
+async function loadHistory() {
+    const el = document.getElementById('history-output');
+    const data = await api('/sync-history');
+    if (!data.length) {
+        el.innerHTML = '<p class="text-muted">No sync history yet.</p>';
+        return;
+    }
+    el.innerHTML = `
+        <table class="data-table">
+            <thead><tr><th>Time</th><th>Job</th><th>Status</th><th>Message</th></tr></thead>
+            <tbody>
+                ${data.map(h => `
+                <tr>
+                    <td class="mono" style="font-size:12px;white-space:nowrap">${formatDate(h.timestamp)}</td>
+                    <td>${h.job_name}</td>
+                    <td>${h.success
+                        ? '<span class="badge badge-success">OK</span>'
+                        : '<span class="badge badge-danger">Failed</span>'}</td>
+                    <td style="font-size:12px;color:var(--text-secondary);max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                        title="${escapeHtml(h.message || '')}">${escapeHtml((h.message || '').slice(0, 120))}</td>
+                </tr>`).join('')}
+            </tbody>
+        </table>`;
+}
+
+function toggleAutoRefresh() {
+    const btn = document.getElementById('auto-refresh-btn');
+    autoRefreshOn = !autoRefreshOn;
+    if (autoRefreshOn) {
+        btn.textContent = '⏹ Auto';
+        btn.style.color = 'var(--success)';
+        autoRefreshTimer = setInterval(loadLogs, 3000);
+        showToast('Auto-refresh on (every 3s)', 'info');
+    } else {
+        btn.textContent = '▶ Auto';
+        btn.style.color = '';
+        clearInterval(autoRefreshTimer);
+        showToast('Auto-refresh off', 'info');
+    }
+}
+
+async function clearLogs() {
+    if (!confirm('Clear the sync log file?')) return;
+    await api('/logs/clear', { method: 'POST' });
+    showToast('Log cleared', 'info');
+    loadLogs();
+}
+
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+        .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+document.addEventListener('DOMContentLoaded', () => { loadLogs(); loadHistory(); });
+</script>
+{% endblock %}
