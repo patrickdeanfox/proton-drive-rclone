@@ -95,9 +95,9 @@
             <div class="form-group">
                 <label>Sync Direction</label>
                 <select id="config-direction">
+                    <option value="push">→ Push (Local → Cloud)</option>
                     <option value="bisync">⇄ Bisync (Two-way)</option>
-                    <option value="push">→ Push (Local → Remote)</option>
-                    <option value="pull">← Pull (Remote → Local)</option>
+                    <option value="pull">← Pull (Cloud → Local)</option>
                 </select>
             </div>
             <div class="form-group">
@@ -121,7 +121,7 @@ let pollTimer = null;
 let pollSince = 0;
 let syncStartTime = null;
 let activeSyncId = null;
-const DIRECTION_LABELS = {bisync:'⇄ Bisync', push:'→ Push', pull:'← Pull'};
+const DIRECTION_LABELS = {bisync:'⇄ Bisync', push:'→ Local → Cloud', pull:'← Cloud → Local'};
 
 /* ── Config list (overrides the generic one from app.js for this page) ── */
 async function loadConfigs() {

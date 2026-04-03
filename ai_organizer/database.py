@@ -24,7 +24,10 @@ DEFAULT_DB = {
     "password": os.getenv("PG_PASSWORD", "protondrive"),
 }
 
-DB_SETTINGS_FILE = Path.home() / ".config" / "protondrive-linux" / "db_settings.json"
+_LEGACY_CFG = Path.home() / ".config" / "protondrive-linux"
+_NEW_CFG    = Path.home() / ".config" / "protondrive"
+_CFG_DIR = _LEGACY_CFG if _LEGACY_CFG.exists() else _NEW_CFG
+DB_SETTINGS_FILE = _CFG_DIR / "db_settings.json"
 
 
 def load_db_settings():

@@ -312,7 +312,7 @@ function renderSyncConfigs(container) {
 }
 
 function directionLabel(d) {
-    return { bisync: '⇄ Bisync', push: '→ Push', pull: '← Pull' }[d] || d;
+    return { bisync: '⇄ Bisync', push: '→ Local → Cloud', pull: '← Cloud → Local' }[d] || d;
 }
 
 /* ─── Config Modal ───────────────────────────────────────────────── */
@@ -324,7 +324,7 @@ function openNewConfig() {
     document.getElementById('config-name').value = '';
     document.getElementById('config-local-path').value = '';
     document.getElementById('config-remote-path').value = '';
-    document.getElementById('config-direction').value = 'bisync';
+    document.getElementById('config-direction').value = 'push';
     document.getElementById('config-excludes').value = '';
     document.getElementById('config-modal-title').textContent = '📂 New Sync Configuration';
     openModal('config-modal');

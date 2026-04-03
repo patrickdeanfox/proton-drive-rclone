@@ -22,11 +22,18 @@ from flask_socketio import SocketIO, emit as sio_emit
 
 # ─── Configuration ─────────────────────────────────────────────────────
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-SCRIPTS_DIR = BASE_DIR / "protondrive-linux" / "scripts"
-CONFIG_DIR = Path.home() / ".config" / "protondrive-linux"
+BASE_DIR = Path(__file__).resolve().parent          # directory containing app.py
+SCRIPTS_DIR = BASE_DIR / "scripts"
+
+# Config & data dirs — check legacy path for backward-compat
+_LEGACY_CONFIG = Path.home() / ".config" / "protondrive-linux"
+_NEW_CONFIG    = Path.home() / ".config" / "protondrive"
+CONFIG_DIR = _LEGACY_CONFIG if _LEGACY_CONFIG.exists() else _NEW_CONFIG
 CONFIG_FILE = CONFIG_DIR / "config.env"
-DATA_DIR = Path.home() / ".local" / "share" / "protondrive-linux"
+
+_LEGACY_DATA = Path.home() / ".local" / "share" / "protondrive-linux"
+_NEW_DATA    = Path.home() / ".local" / "share" / "protondrive"
+DATA_DIR = _LEGACY_DATA if _LEGACY_DATA.exists() else _NEW_DATA
 WEBAPP_DATA = DATA_DIR / "webapp"
 SCHEDULES_FILE = WEBAPP_DATA / "schedules.json"
 SYNC_CONFIGS_FILE = WEBAPP_DATA / "sync_configs.json"
@@ -100,6 +107,9 @@ def load_config_env():
             if "=" in line:
                 key, _, val = line.partition("=")
                 val = val.strip().strip('"').strip("'")
+                # Strip inline comments (e.g.  50  # safety limit)
+                if "#" in val:
+                    val = val[:val.index("#")].strip()
                 # Expand $HOME
                 val = val.replace("$HOME", str(Path.home()))
                 config[key.strip()] = val
@@ -392,7 +402,7 @@ def execute_sync_job(job_id):
     remote = env_config.get("RCLONE_REMOTE", "protondrive")
     local_path = config.get("local_path", "")
     remote_path = config.get("remote_path", "")
-    direction = config.get("direction", "bisync")
+    direction = config.get("direction", "push")
 
     if not local_path:
         record_sync(job_id, config.get("name", ""), False, "No local path configured")
@@ -642,7 +652,7 @@ def api_create_sync_config():
         "name": data.get("name", "Untitled"),
         "local_path": data.get("local_path", ""),
         "remote_path": data.get("remote_path", ""),
-        "direction": data.get("direction", "bisync"),
+        "direction": data.get("direction", "push"),
         "exclude_patterns": data.get("exclude_patterns", ""),
         "created_at": datetime.now().isoformat(),
         "enabled": True,
@@ -711,7 +721,7 @@ def api_run_sync(config_id):
             "started_at": datetime.now().isoformat(),
             "name": config.get("name", config_id),
             "progress": {},
-            "direction": config.get("direction", "bisync"),
+            "direction": config.get("direction", "push"),
             "local_path": config.get("local_path", ""),
             "remote_path": config.get("remote_path", ""),
         }
