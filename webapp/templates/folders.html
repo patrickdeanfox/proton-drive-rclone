@@ -85,6 +85,7 @@ let pollTimer = null;
 let pollSince = 0;
 let syncStartTime = null;
 let activeSyncId = null;
+const DIRECTION_LABELS = {bisync:'⇄ Bisync', push:'→ Push', pull:'← Pull'};
 
 /* ── Config list ── */
 async function loadConfigs() {
@@ -106,7 +107,7 @@ async function loadConfigs() {
                     <td><strong>${c.name}</strong></td>
                     <td class="mono" style="font-size:12px">${c.local_path || '—'}</td>
                     <td class="mono" style="font-size:12px">${c.remote_path || '(root)'}</td>
-                    <td>${{bisync:'⇄ Bisync', push:'→ Push', pull:'← Pull'}[c.direction] || c.direction}</td>
+                    <td>${DIRECTION_LABELS[c.direction] || c.direction}</td>
                     <td>
                         <button class="btn btn-primary btn-xs" id="run-btn-${c.id}"
                                 onclick="runSync('${c.id}', '${c.name.replace(/'/g,"\\'")}')">▶ Sync</button>
