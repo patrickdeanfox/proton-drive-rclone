@@ -229,6 +229,44 @@ CREATE TABLE IF NOT EXISTS collection_files (
     file_id         BIGINT REFERENCES files(id) ON DELETE CASCADE,
     PRIMARY KEY (collection_id, file_id)
 );
+
+-- Migration jobs tracking
+CREATE TABLE IF NOT EXISTS migration_jobs (
+    id              TEXT PRIMARY KEY,
+    source_remote   TEXT NOT NULL,
+    source_path     TEXT DEFAULT '',
+    dest_remote     TEXT NOT NULL,
+    dest_path       TEXT DEFAULT '',
+    mode            TEXT DEFAULT 'copy',
+    status          TEXT DEFAULT 'pending',
+    progress        REAL DEFAULT 0,
+    bytes_done      BIGINT DEFAULT 0,
+    bytes_total     BIGINT DEFAULT 0,
+    files_done      INT DEFAULT 0,
+    files_total     INT DEFAULT 0,
+    options_json    JSONB DEFAULT '{}',
+    result_json     JSONB DEFAULT '{}',
+    error_message   TEXT,
+    started_at      TIMESTAMPTZ,
+    finished_at     TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ DEFAULT now()
+);
+
+-- Progress snapshots for operations
+CREATE TABLE IF NOT EXISTS progress_snapshots (
+    id              BIGSERIAL PRIMARY KEY,
+    operation_id    TEXT NOT NULL,
+    operation_type  TEXT NOT NULL,
+    percent         REAL DEFAULT 0,
+    current_val     BIGINT DEFAULT 0,
+    total_val       BIGINT DEFAULT 0,
+    message         TEXT,
+    speed           REAL,
+    eta_seconds     REAL,
+    snapshot_json   JSONB DEFAULT '{}',
+    created_at      TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_progress_op ON progress_snapshots(operation_id);
 """
 
 
@@ -472,6 +510,55 @@ def get_recent_jobs(limit=20):
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT %s", (limit,))
         return cur.fetchall()
+
+
+def create_migration_job(data: dict):
+    """Create a migration job record."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO migration_jobs (id, source_remote, source_path, dest_remote, dest_path,
+                                        mode, status, options_json, started_at)
+            VALUES (%(id)s, %(source_remote)s, %(source_path)s, %(dest_remote)s, %(dest_path)s,
+                    %(mode)s, 'running', %(options_json)s, now())
+        """, data)
+
+
+def update_migration_job(job_id, **kwargs):
+    """Update a migration job record."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        sets = []
+        params = []
+        for k, v in kwargs.items():
+            if k == "result":
+                sets.append("result_json = %s")
+                params.append(json.dumps(v))
+            elif k == "options":
+                sets.append("options_json = %s")
+                params.append(json.dumps(v))
+            else:
+                sets.append(f"{k} = %s")
+                params.append(v)
+        if kwargs.get("status") in ("completed", "failed", "cancelled"):
+            sets.append("finished_at = now()")
+        if sets:
+            params.append(job_id)
+            cur.execute(f"UPDATE migration_jobs SET {', '.join(sets)} WHERE id = %s", params)
+
+
+def get_migration_jobs(limit=20):
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM migration_jobs ORDER BY created_at DESC LIMIT %s", (limit,))
+        return cur.fetchall()
+
+
+def get_migration_job(job_id):
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM migration_jobs WHERE id = %s", (job_id,))
+        return cur.fetchone()
 
 
 def get_stats():

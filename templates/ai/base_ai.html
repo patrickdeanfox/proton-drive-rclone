@@ -47,6 +47,11 @@
                     <span class="nav-icon">🔄</span> Rclone
                 </a>
 
+                <div class="nav-section-label">Migrate</div>
+                <a href="/ai/migration" class="{% if active == 'ai_migration' %}active{% endif %}">
+                    <span class="nav-icon">📦</span> Dropbox Migration
+                </a>
+
                 <div class="nav-section-label">Extend</div>
                 <a href="/ai/extensions" class="{% if active == 'ai_extensions' %}active{% endif %}">
                     <span class="nav-icon">🧩</span> Extensions
@@ -70,6 +75,8 @@
 
     <div id="toast-container"></div>
 
+    <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+    <script src="/static/js/progress.js"></script>
     <script src="/static/js/ai.js"></script>
     {% block scripts %}{% endblock %}
 </body>

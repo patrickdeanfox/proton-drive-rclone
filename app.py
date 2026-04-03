@@ -18,6 +18,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from flask import Flask, Response, jsonify, render_template, request, send_file
+from flask_socketio import SocketIO, emit as sio_emit
 
 # ─── Configuration ─────────────────────────────────────────────────────
 
@@ -38,15 +39,52 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 SYNC_LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__)
+app.config["SECRET_KEY"] = "protondrive-socketio-secret"
+
+# Initialize SocketIO with threading async mode (works with APScheduler)
+socketio = SocketIO(app, async_mode="threading", cors_allowed_origins="*",
+                    logger=False, engineio_logger=False)
+
 scheduler = BackgroundScheduler(daemon=True)
 scheduler.start()
 
-# ─── Register AI Organizer Blueprint ────────────────────────────────────
+# ─── Register AI Organizer Blueprint & Progress System ──────────────────
 try:
     from ai_organizer.api import bp as ai_bp
+    from ai_organizer.progress import set_socketio
     app.register_blueprint(ai_bp)
+    set_socketio(socketio)
 except Exception as _ai_err:
     print(f"[WARN] AI Organizer blueprint not loaded: {_ai_err}")
+
+
+# ─── WebSocket Event Handlers ──────────────────────────────────────────
+
+@socketio.on("connect", namespace="/progress")
+def ws_connect():
+    """Client connected to progress namespace."""
+    pass
+
+@socketio.on("disconnect", namespace="/progress")
+def ws_disconnect():
+    """Client disconnected."""
+    pass
+
+@socketio.on("subscribe", namespace="/progress")
+def ws_subscribe(data):
+    """Subscribe to a specific operation's progress."""
+    from flask_socketio import join_room
+    op_id = data.get("operation_id", "")
+    if op_id:
+        join_room(op_id)
+
+@socketio.on("unsubscribe", namespace="/progress")
+def ws_unsubscribe(data):
+    """Unsubscribe from operation progress."""
+    from flask_socketio import leave_room
+    op_id = data.get("operation_id", "")
+    if op_id:
+        leave_room(op_id)
 
 # ─── Helpers ───────────────────────────────────────────────────────────
 
@@ -1515,5 +1553,6 @@ if __name__ == "__main__":
     print("=" * 60)
     print("  Proton Drive rclone Web Interface")
     print(f"  http://localhost:{args.port}")
+    print("  WebSocket: enabled (Socket.IO)")
     print("=" * 60)
-    app.run(host=args.host, port=args.port, debug=False)
+    socketio.run(app, host=args.host, port=args.port, debug=False, allow_unsafe_werkzeug=True)

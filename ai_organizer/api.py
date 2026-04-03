@@ -23,7 +23,17 @@ from .engines.rclone_engine import (
     check_rclone, list_remotes, get_remote_about,
     get_transfer_stats, DEFAULT_SETTINGS as RCLONE_DEFAULTS,
 )
+from .engines.migration_engine import (
+    check_dropbox_remote, configure_dropbox_remote, test_dropbox_connection,
+    browse_remote, get_folder_size, dry_run_migration, start_migration,
+    cancel_migration, get_migration_status, get_migration_logs,
+    list_active_migrations,
+)
 from .utils.yaml_rules import import_rules_from_yaml, export_rules_to_yaml
+from .progress import (
+    ProgressTracker, register_operation, unregister_operation,
+    get_active_operations, get_operation, emit_progress,
+)
 
 log = logging.getLogger(__name__)
 bp = Blueprint("ai", __name__, url_prefix="/ai")
@@ -95,6 +105,11 @@ def extensions_page():
     return render_template("ai/extensions.html", active="ai_extensions")
 
 
+@bp.route("/migration")
+def migration_page():
+    return render_template("ai/migration.html", active="ai_migration")
+
+
 # ── API: Stats ────────────────────────────────────────────────────────
 
 @bp.route("/api/stats")
@@ -141,6 +156,22 @@ def api_job_status(job_id):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+# ── API: Progress (HTTP fallback for WebSocket) ────────────────────────
+
+@bp.route("/api/progress")
+def api_progress():
+    """Get all active operation progress (fallback for non-WebSocket clients)."""
+    return jsonify({"ok": True, "operations": get_active_operations()})
+
+
+@bp.route("/api/progress/<operation_id>")
+def api_progress_detail(operation_id):
+    op = get_operation(operation_id)
+    if not op:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+    return jsonify({"ok": True, **op})
+
+
 # ── API: Scan ─────────────────────────────────────────────────────────
 
 @bp.route("/api/scan", methods=["POST"])
@@ -173,11 +204,21 @@ def api_organize_apply():
     base_dest = data.get("base_dest", "")
     dry_run = data.get("dry_run", True)
 
+    # Create progress tracker
+    tracker = ProgressTracker(
+        operation_type="organize",
+        total=len(proposals),
+        unit="files",
+    )
+    register_operation(tracker)
+
     results = []
-    for p in proposals:
+    for i, p in enumerate(proposals):
         src = Path(p["file_path"])
         dest_folder = Path(base_dest) / p["dest_folder"] if base_dest else Path(p["dest_folder"])
         dest = dest_folder / src.name
+
+        tracker.update(current=i, message=f"Processing {src.name}")
 
         if dry_run:
             results.append({"file": str(src), "dest": str(dest), "status": "dry_run"})
@@ -185,7 +226,6 @@ def api_organize_apply():
             try:
                 dest_folder.mkdir(parents=True, exist_ok=True)
                 src.rename(dest)
-                # Log action
                 with db.get_conn() as conn:
                     cur = conn.cursor()
                     cur.execute("""
@@ -195,6 +235,9 @@ def api_organize_apply():
                 results.append({"file": str(src), "dest": str(dest), "status": "moved"})
             except Exception as e:
                 results.append({"file": str(src), "dest": str(dest), "status": "error", "error": str(e)})
+
+    tracker.complete(result={"count": len(results)})
+    unregister_operation(tracker.operation_id)
 
     return jsonify({"ok": True, "results": results})
 
@@ -276,7 +319,7 @@ def api_export_rules():
 @bp.route("/api/duplicates/detect", methods=["POST"])
 def api_detect_duplicates():
     data = request.get_json(force=True) if request.is_json else {}
-    mode = data.get("mode", "all")  # 'exact', 'near', 'all'
+    mode = data.get("mode", "all")
     try:
         if mode == "exact":
             job_id = _run_bg("dup_exact", find_exact_duplicates)
@@ -324,7 +367,7 @@ def api_dup_group_detail(group_id):
 def api_resolve_duplicate():
     data = request.get_json(force=True)
     group_id = data.get("group_id")
-    actions = data.get("actions", {})  # {member_id: true/false}
+    actions = data.get("actions", {})
 
     try:
         for mid_str, keep in actions.items():
@@ -397,7 +440,6 @@ def api_db_test():
 @bp.route("/api/db/settings", methods=["GET"])
 def api_db_settings_get():
     settings = db.load_db_settings()
-    # Don't expose password in full
     safe = dict(settings)
     if safe.get("password"):
         safe["password"] = "••••••••"
@@ -462,6 +504,139 @@ def api_rclone_settings_put():
     try:
         db.set_preference("rclone_settings", data)
         return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ── API: Migration Wizard ─────────────────────────────────────────────
+
+@bp.route("/api/migration/check-dropbox")
+def api_migration_check_dropbox():
+    """Check if Dropbox remote exists."""
+    return jsonify(check_dropbox_remote())
+
+
+@bp.route("/api/migration/configure-dropbox", methods=["POST"])
+def api_migration_configure_dropbox():
+    """Configure a new Dropbox remote."""
+    data = request.get_json(force=True) if request.is_json else {}
+    name = data.get("remote_name", "dropbox")
+    return jsonify(configure_dropbox_remote(name))
+
+
+@bp.route("/api/migration/test-connection", methods=["POST"])
+def api_migration_test_connection():
+    """Test Dropbox connection."""
+    data = request.get_json(force=True) if request.is_json else {}
+    remote = data.get("remote_name", "dropbox")
+    return jsonify(test_dropbox_connection(remote))
+
+
+@bp.route("/api/migration/browse")
+def api_migration_browse():
+    """Browse a remote directory (Dropbox or Proton)."""
+    remote = request.args.get("remote", "dropbox")
+    path = request.args.get("path", "")
+    return jsonify(browse_remote(remote, path))
+
+
+@bp.route("/api/migration/folder-size")
+def api_migration_folder_size():
+    """Get folder size info."""
+    remote = request.args.get("remote", "dropbox")
+    path = request.args.get("path", "")
+    return jsonify(get_folder_size(remote, path))
+
+
+@bp.route("/api/migration/dry-run", methods=["POST"])
+def api_migration_dry_run():
+    """Preview migration."""
+    data = request.get_json(force=True)
+    return jsonify(dry_run_migration(
+        source_remote=data.get("source_remote", "dropbox"),
+        source_path=data.get("source_path", ""),
+        dest_remote=data.get("dest_remote", "protondrive"),
+        dest_path=data.get("dest_path", ""),
+        filters=data.get("filters"),
+        preserve_structure=data.get("preserve_structure", True),
+    ))
+
+
+@bp.route("/api/migration/start", methods=["POST"])
+def api_migration_start():
+    """Start a migration."""
+    data = request.get_json(force=True)
+    migration_id = str(uuid.uuid4())[:12]
+
+    # Save to DB
+    try:
+        db.create_migration_job({
+            "id": migration_id,
+            "source_remote": data.get("source_remote", "dropbox"),
+            "source_path": data.get("source_path", ""),
+            "dest_remote": data.get("dest_remote", "protondrive"),
+            "dest_path": data.get("dest_path", ""),
+            "mode": data.get("mode", "copy"),
+            "options_json": json.dumps(data.get("options", {})),
+        })
+    except Exception as e:
+        log.warning("Could not save migration to DB: %s", e)
+
+    result = start_migration(
+        migration_id=migration_id,
+        source_remote=data.get("source_remote", "dropbox"),
+        source_path=data.get("source_path", ""),
+        dest_remote=data.get("dest_remote", "protondrive"),
+        dest_path=data.get("dest_path", ""),
+        options=data.get("options", {}),
+    )
+    return jsonify(result)
+
+
+@bp.route("/api/migration/cancel", methods=["POST"])
+def api_migration_cancel():
+    """Cancel a running migration."""
+    data = request.get_json(force=True)
+    mid = data.get("migration_id", "")
+    return jsonify(cancel_migration(mid))
+
+
+@bp.route("/api/migration/status/<migration_id>")
+def api_migration_status(migration_id):
+    """Get migration status."""
+    status = get_migration_status(migration_id)
+    if not status:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+    return jsonify({"ok": True, **status})
+
+
+@bp.route("/api/migration/logs/<migration_id>")
+def api_migration_logs(migration_id):
+    """Get migration log lines."""
+    since = int(request.args.get("since", 0))
+    lines = get_migration_logs(migration_id, since)
+    return jsonify({"ok": True, "lines": lines, "total": since + len(lines)})
+
+
+@bp.route("/api/migration/list")
+def api_migration_list():
+    """List active/recent migrations."""
+    return jsonify({"ok": True, "migrations": list_active_migrations()})
+
+
+@bp.route("/api/migration/history")
+def api_migration_history():
+    """Get migration history from database."""
+    try:
+        jobs = db.get_migration_jobs(limit=50)
+        result = []
+        for j in jobs:
+            d = dict(j)
+            for k in ("started_at", "finished_at", "created_at"):
+                if d.get(k) and isinstance(d[k], datetime):
+                    d[k] = d[k].isoformat()
+            result.append(d)
+        return jsonify({"ok": True, "jobs": result})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -538,9 +713,9 @@ def api_extensions():
         },
         {
             "id": "dropbox",
-            "name": "Dropbox Integration",
-            "description": "Import and sync with Dropbox.",
-            "status": "planned",
+            "name": "Dropbox Migration",
+            "description": "Migrate files from Dropbox to Proton Drive.",
+            "status": "active",
             "icon": "📦",
         },
     ]
