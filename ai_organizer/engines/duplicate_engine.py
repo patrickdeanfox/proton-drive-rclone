@@ -17,9 +17,10 @@ Safety enforcement:
 
 import logging
 import uuid
-from collections import defaultdict
 from pathlib import Path
 from typing import Optional
+
+import psycopg2.extras
 
 from .. import database as db
 from ..progress import ProgressTracker, register_operation, unregister_operation
@@ -152,7 +153,8 @@ class _BKTree:
 # Fuzzy document duplicate detection (rapidfuzz)
 # ---------------------------------------------------------------------------
 
-def find_fuzzy_document_duplicates(threshold: float = 0.85, job_id: str = None) -> dict:
+def find_fuzzy_document_duplicates(threshold: float = 0.85, job_id: str = None,
+                                    db_module=None) -> dict:
     """Find near-duplicate documents by comparing OCR/extracted text content.
 
     Uses rapidfuzz token_set_ratio — much faster than edit distance for
@@ -160,9 +162,10 @@ def find_fuzzy_document_duplicates(threshold: float = 0.85, job_id: str = None) 
 
     threshold: 0.0–1.0 similarity required to be considered near-duplicate.
     """
+    _db = db_module or db
     if job_id is None:
         job_id = str(uuid.uuid4())
-    db.create_job(job_id, "duplicates")
+    _db.create_job(job_id, "duplicates")
 
     tracker = ProgressTracker(
         operation_type="duplicate_fuzzy_docs",
@@ -179,12 +182,11 @@ def find_fuzzy_document_duplicates(threshold: float = 0.85, job_id: str = None) 
         log.warning(msg)
         tracker.fail(error=msg)
         unregister_operation(tracker.operation_id)
-        db.update_job(job_id, status="failed", message=msg)
+        _db.update_job(job_id, status="failed", message=msg)
         return {"job_id": job_id, "groups": 0, "error": msg}
 
     # Fetch files that have OCR text
-    with db.get_conn() as conn:
-        import psycopg2.extras
+    with _db.get_conn() as conn:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute("""
             SELECT f.id, f.file_path, o.text_content
@@ -195,6 +197,7 @@ def find_fuzzy_document_duplicates(threshold: float = 0.85, job_id: str = None) 
         """)
         docs = cur.fetchall()
 
+    _TEXT_LIMIT = 5000  # cap text comparison at 5KB for speed
     total = len(docs)
     tracker.total = total
     tracker.update(current=0, message=f"Comparing {total} documents for fuzzy duplicates…")
@@ -207,12 +210,12 @@ def find_fuzzy_document_duplicates(threshold: float = 0.85, job_id: str = None) 
             tracker.update(current=i + 1, message=f"Fuzzy compare {i+1}/{total}")
             continue
         group = [(doc_a["id"], 1.0)]
-        text_a = (doc_a["text_content"] or "")[:5000]  # cap at 5KB for speed
+        text_a = (doc_a["text_content"] or "")[:_TEXT_LIMIT]
 
         for doc_b in docs[i + 1:]:
             if doc_b["id"] in used:
                 continue
-            text_b = (doc_b["text_content"] or "")[:5000]
+            text_b = (doc_b["text_content"] or "")[:_TEXT_LIMIT]
             ratio = fuzz.token_set_ratio(text_a, text_b) / 100.0
             if ratio >= threshold:
                 group.append((doc_b["id"], round(ratio, 4)))
@@ -227,13 +230,13 @@ def find_fuzzy_document_duplicates(threshold: float = 0.85, job_id: str = None) 
     total_groups = 0
     for group in groups:
         ref_id = group[0][0]
-        db.save_duplicate_group(f"fuzzy:{ref_id}", "fuzzy_text", group)
+        _db.save_duplicate_group(f"fuzzy:{ref_id}", "fuzzy_text", group)
         total_groups += 1
 
     summary = {"job_id": job_id, "groups": total_groups}
-    db.update_job(job_id, status="completed", progress=1.0,
-                  message=f"Found {total_groups} fuzzy document duplicate groups",
-                  result=summary)
+    _db.update_job(job_id, status="completed", progress=1.0,
+                   message=f"Found {total_groups} fuzzy document duplicate groups",
+                   result=summary)
     tracker.complete(result=summary)
     unregister_operation(tracker.operation_id)
     return summary
@@ -436,12 +439,11 @@ def resolve_duplicates(group_id: int, actions: dict,
     _db = db_module or db
     threshold = get_certainty_threshold(_db)
 
-    # Fetch member details including similarity scores
+    # Fetch ALL member details including similarity scores and current keep state
     with _db.get_conn() as conn:
-        import psycopg2.extras
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute("""
-            SELECT dm.id, dm.file_id, dm.similarity, f.file_path
+            SELECT dm.id, dm.file_id, dm.similarity, dm.keep, f.file_path
             FROM duplicate_members dm
             JOIN files f ON f.id = dm.file_id
             WHERE dm.group_id = %s
@@ -450,6 +452,8 @@ def resolve_duplicates(group_id: int, actions: dict,
 
     blocked = []
     applied = 0
+    # Track keep state locally to avoid a second DB round-trip
+    pending_keep: dict[int, bool | None] = {mid: dict(m)["keep"] for mid, m in members.items()}
 
     for member_id_str, keep in actions.items():
         member_id = int(member_id_str)
@@ -475,17 +479,11 @@ def resolve_duplicates(group_id: int, actions: dict,
                 continue
 
         _db.update_duplicate_member_keep(member_id, keep)
+        pending_keep[member_id] = keep
         applied += 1
 
-    # If all members have been decided, mark group resolved
-    with _db.get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT count(*) FROM duplicate_members
-            WHERE group_id = %s AND keep IS NULL
-        """, (group_id,))
-        undecided = cur.fetchone()[0]
-
+    # Compute undecided count from in-memory state — no second DB query needed
+    undecided = sum(1 for k in pending_keep.values() if k is None)
     if undecided == 0:
         _db.update_duplicate_group_status(group_id, "resolved")
 

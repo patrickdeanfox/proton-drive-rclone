@@ -13,9 +13,11 @@ Public API:
 """
 
 import logging
-import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Optional
+
+import psycopg2.extras
 
 log = logging.getLogger(__name__)
 
@@ -60,7 +62,6 @@ def _text_search(query: str, limit: int, db_module) -> list:
     results = []
     try:
         with db_module.get_conn() as conn:
-            import psycopg2.extras
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             # Broad candidate set: use PG full-text on file_name + ocr text
             cur.execute("""
@@ -119,45 +120,18 @@ def _text_search(query: str, limit: int, db_module) -> list:
 def _generate_query_embedding(query: str, embed_type: str = "text") -> Optional[list]:
     """Generate a query embedding for semantic search.
 
-    For text queries: uses sentence-transformers (local, ~80MB model).
-    For image queries: not applicable via search — use file embedding directly.
+    Delegates to the SentenceTransformerProvider in ai_engine so the model
+    is loaded and cached exactly once across all callers.
     """
-    if embed_type == "text":
-        try:
-            from sentence_transformers import SentenceTransformer
-            model = _get_text_model()
-            if model is None:
-                return None
-            vec = model.encode(query, normalize_embeddings=True)
-            return vec.tolist()
-        except ImportError:
-            log.debug("sentence-transformers not installed — semantic search unavailable")
-            return None
-        except Exception as e:
-            log.warning("Query embedding error: %s", e)
-            return None
-    return None
-
-
-_text_model_cache = None
-
-
-def _get_text_model():
-    """Lazy-load the sentence-transformers model (cached)."""
-    global _text_model_cache
-    if _text_model_cache is not None:
-        return _text_model_cache
-    try:
-        from sentence_transformers import SentenceTransformer
-        log.info("Loading sentence-transformers model (first time ~80MB)…")
-        _text_model_cache = SentenceTransformer("all-MiniLM-L6-v2")
-        log.info("Sentence-transformers model loaded.")
-        return _text_model_cache
-    except ImportError:
-        log.debug("sentence-transformers not installed")
+    if embed_type != "text":
         return None
+    try:
+        from .ai_engine import get_provider
+        provider = get_provider("sentence_transformers")
+        vec = provider.generate_text_embedding(query)
+        return vec if vec else None
     except Exception as e:
-        log.warning("Failed to load sentence-transformers: %s", e)
+        log.warning("Query embedding error: %s", e)
         return None
 
 
@@ -172,7 +146,6 @@ def _semantic_search(query: str, limit: int, db_module,
 
     try:
         with db_module.get_conn() as conn:
-            import psycopg2.extras
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             # pgvector cosine distance operator: <=>
             cur.execute("""
@@ -269,9 +242,12 @@ def search_files(query: str, mode: str = "hybrid", limit: int = 20,
         return _text_search(query, limit, db_module)
     elif mode == "semantic":
         return _semantic_search(query, limit, db_module)
-    else:  # hybrid
-        text_r = _text_search(query, limit, db_module)
-        sem_r = _semantic_search(query, limit, db_module)
+    else:  # hybrid — run both searches concurrently
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            text_future = pool.submit(_text_search, query, limit, db_module)
+            sem_future  = pool.submit(_semantic_search, query, limit, db_module)
+            text_r = text_future.result()
+            sem_r  = sem_future.result()
         return _merge_results(text_r, sem_r, limit=limit)
 
 

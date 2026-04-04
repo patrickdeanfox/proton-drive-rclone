@@ -159,6 +159,8 @@ CREATE TABLE IF NOT EXISTS duplicate_members (
     keep            BOOLEAN DEFAULT NULL  -- NULL=undecided, TRUE=keep, FALSE=delete
 );
 CREATE INDEX IF NOT EXISTS idx_dupmem_group ON duplicate_members(group_id);
+CREATE INDEX IF NOT EXISTS idx_dupgrp_status ON duplicate_groups(status);
+CREATE INDEX IF NOT EXISTS idx_dupgrp_type ON duplicate_groups(detection_type);
 
 -- Organization rules
 CREATE TABLE IF NOT EXISTS organization_rules (
@@ -593,6 +595,10 @@ def create_migration_job(data: dict):
 
 def update_migration_job(job_id, **kwargs):
     """Update a migration job record."""
+    _ALLOWED = {
+        "status", "progress", "bytes_done", "bytes_total",
+        "files_done", "files_total", "error_message",
+    }
     with get_conn() as conn:
         cur = conn.cursor()
         sets = []
@@ -604,9 +610,11 @@ def update_migration_job(job_id, **kwargs):
             elif k == "options":
                 sets.append("options_json = %s")
                 params.append(json.dumps(v))
-            else:
+            elif k in _ALLOWED:
                 sets.append(f"{k} = %s")
                 params.append(v)
+            else:
+                log.warning("update_migration_job: ignoring unknown field %r", k)
         if kwargs.get("status") in ("completed", "failed", "cancelled"):
             sets.append("finished_at = now()")
         if sets:

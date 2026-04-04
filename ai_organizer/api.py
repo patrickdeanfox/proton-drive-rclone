@@ -2,10 +2,14 @@
 
 import json
 import logging
+import os
 import threading
 import uuid
+import weakref
 from datetime import datetime
 from pathlib import Path
+
+import psycopg2.extras
 
 from flask import Blueprint, jsonify, render_template, request
 
@@ -42,8 +46,31 @@ from .progress import (
 log = logging.getLogger(__name__)
 bp = Blueprint("ai", __name__, url_prefix="/ai")
 
-# Convenience: run a long task in background
-_bg_threads = {}
+# Directories that must never be scanned or read
+_BLOCKED_ROOTS = {"/proc", "/sys", "/dev", "/boot", "/sbin", "/bin",
+                  "/run", "/snap"}
+
+
+def _safe_path(raw: str, must_exist: bool = True) -> Path:
+    """Resolve and validate a user-supplied path.
+
+    Raises ValueError for empty paths, non-existent paths (when must_exist),
+    or paths that point into dangerous system directories.
+    """
+    if not raw or not raw.strip():
+        raise ValueError("Path must not be empty")
+    resolved = Path(raw).resolve()
+    for blocked in _BLOCKED_ROOTS:
+        if str(resolved).startswith(blocked):
+            raise ValueError(f"Access to {blocked} is not permitted")
+    if must_exist and not resolved.exists():
+        raise ValueError(f"Path does not exist: {resolved}")
+    return resolved
+
+# Background job tracking — WeakValueDictionary releases threads automatically
+# after they finish so dead threads don't accumulate in memory.
+_bg_threads: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+_bg_threads_lock = threading.Lock()
 
 
 def _run_bg(name, fn, *args, **kwargs):
@@ -60,8 +87,9 @@ def _run_bg(name, fn, *args, **kwargs):
             except Exception:
                 pass
 
-    t = threading.Thread(target=_wrapper, daemon=True)
-    _bg_threads[job_id] = t
+    t = threading.Thread(target=_wrapper, name=f"bg-{name}-{job_id[:8]}", daemon=True)
+    with _bg_threads_lock:
+        _bg_threads[job_id] = t
     t.start()
     return job_id
 
@@ -181,10 +209,14 @@ def api_progress_detail(operation_id):
 @bp.route("/api/scan", methods=["POST"])
 def api_scan():
     data = request.get_json(force=True)
-    path = data.get("path", "")
-    if not path or not Path(path).is_dir():
-        return jsonify({"ok": False, "error": "Invalid directory path"}), 400
-    job_id = _run_bg("scan", scan_directory, path)
+    raw_path = data.get("path", "")
+    try:
+        safe = _safe_path(raw_path)
+        if not safe.is_dir():
+            return jsonify({"ok": False, "error": "Path is not a directory"}), 400
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    job_id = _run_bg("scan", scan_directory, str(safe))
     return jsonify({"ok": True, "job_id": job_id})
 
 
@@ -297,11 +329,15 @@ def api_delete_rule(rule_id):
 @bp.route("/api/rules/import", methods=["POST"])
 def api_import_rules():
     data = request.get_json(force=True)
-    yaml_path = data.get("path", "")
-    if not yaml_path or not Path(yaml_path).exists():
-        return jsonify({"ok": False, "error": "YAML file not found"}), 400
+    raw_path = data.get("path", "")
     try:
-        count = import_rules_from_yaml(yaml_path)
+        safe = _safe_path(raw_path)
+        if safe.suffix.lower() not in (".yml", ".yaml"):
+            return jsonify({"ok": False, "error": "File must be a .yml or .yaml file"}), 400
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    try:
+        count = import_rules_from_yaml(str(safe))
         return jsonify({"ok": True, "imported": count})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -309,8 +345,18 @@ def api_import_rules():
 
 @bp.route("/api/rules/export", methods=["POST"])
 def api_export_rules():
+    import tempfile
     data = request.get_json(force=True)
-    output = data.get("path", "/tmp/organize-rules-export.yml")
+    # Use caller-supplied path only if explicitly provided and safe; otherwise temp file
+    raw_path = data.get("path", "")
+    if raw_path:
+        try:
+            output = str(_safe_path(raw_path, must_exist=False))
+        except ValueError as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+    else:
+        fd, output = tempfile.mkstemp(suffix=".yml", prefix="organize-rules-export-")
+        os.close(fd)
     try:
         content = export_rules_to_yaml(output)
         return jsonify({"ok": True, "path": output, "content": content})
@@ -710,7 +756,6 @@ def api_metadata_extract():
     """Trigger Python-first metadata extraction on all un-extracted files."""
     try:
         with db.get_conn() as conn:
-            import psycopg2.extras
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             cur.execute("""
                 SELECT f.id, f.file_path FROM files f
@@ -736,7 +781,6 @@ def api_ocr_scan():
     lang = data.get("lang", "eng")
     try:
         with db.get_conn() as conn:
-            import psycopg2.extras
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             cur.execute("""
                 SELECT f.id, f.file_path FROM files f

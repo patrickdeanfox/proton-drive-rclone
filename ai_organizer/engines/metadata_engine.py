@@ -104,9 +104,6 @@ _EXT_CATEGORY = {
     ".iso": "disk_image", ".img": "disk_image", ".dmg": "disk_image",
 }
 
-# These categories need AI for richer sub-classification (e.g. photo type)
-_AI_REFINE_CATEGORIES = {"image"}
-
 
 # ---------------------------------------------------------------------------
 # Image EXIF extraction

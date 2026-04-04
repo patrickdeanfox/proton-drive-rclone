@@ -23,6 +23,8 @@ import os
 import uuid
 from pathlib import Path
 
+import psycopg2.extras
+
 from .. import database as db
 from ..progress import ProgressTracker, register_operation, unregister_operation
 
@@ -272,7 +274,6 @@ def analyze_file(file_id: int, provider_name: str = None) -> dict:
     from .metadata_engine import extract_metadata
 
     with db.get_conn() as conn:
-        import psycopg2.extras
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute("SELECT * FROM files WHERE id = %s", (file_id,))
         file_data = cur.fetchone()

@@ -34,6 +34,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import psycopg2.extras
+
 # Ensure the project root is on the path when run as a script
 _PROJECT_ROOT = Path(__file__).parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
@@ -114,7 +116,6 @@ def _tool_get_file_metadata(file_id: int = None,
     # Resolve file_id from path if needed
     if file_id is None and file_path:
         with db.get_conn() as conn:
-            import psycopg2.extras
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             cur.execute("SELECT id FROM files WHERE file_path = %s", (file_path,))
             row = cur.fetchone()
@@ -130,7 +131,6 @@ def _tool_get_file_metadata(file_id: int = None,
     result = {"file_id": file_id}
 
     with db.get_conn() as conn:
-        import psycopg2.extras
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         # Base file record
         cur.execute("SELECT * FROM files WHERE id = %s", (file_id,))
@@ -215,17 +215,19 @@ def _tool_browse_files(path: str = "/", mime_prefix: str = None,
     """List indexed files in a directory with rich metadata."""
     db = _get_db()
 
+    # Escape LIKE metacharacters so literal path characters are matched
+    path_escaped = path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
     with db.get_conn() as conn:
-        import psycopg2.extras
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        params = [f"{path}%"]
+        params = [f"{path_escaped}%"]
         q = """
             SELECT f.id, f.file_path, f.file_name, f.extension, f.mime_type,
                    f.size_bytes, f.modified_at, m.python_category,
                    m.python_confidence, m.needs_ai
             FROM files f
             LEFT JOIN file_metadata m ON m.file_id = f.id
-            WHERE f.file_path LIKE %s
+            WHERE f.file_path LIKE %s ESCAPE '\\'
         """
         if mime_prefix:
             q += " AND f.mime_type LIKE %s"
@@ -254,19 +256,27 @@ def _tool_propose_organization(path: str,
     from ai_organizer.engines.rule_engine import propose_organization
     db = _get_db()
 
+    # propose_organization fetches files from DB; filter by path prefix in Python
     try:
-        proposals = propose_organization(path, db_module=db)
-    except TypeError:
-        # Signature may vary — try without db_module
-        proposals = propose_organization(path)
+        all_proposals = propose_organization()
+    except Exception as e:
+        return {"error": f"propose_organization failed: {e}"}
 
-    if not isinstance(proposals, list):
-        proposals = list(proposals) if proposals else []
+    if not isinstance(all_proposals, list):
+        all_proposals = list(all_proposals) if all_proposals else []
 
-    # Filter by confidence threshold
+    # Filter to path prefix
+    proposals = [p for p in all_proposals
+                 if p.get("file_path", "").startswith(path)]
+
+    # Filter by confidence threshold (rule-engine proposals don't include confidence;
+    # default to 1.0 for deterministic rule matches)
     safe_proposals = []
     for p in proposals:
-        conf = float(p.get("confidence", 1.0))
+        try:
+            conf = float(p.get("confidence", 1.0))
+        except (TypeError, ValueError):
+            conf = 1.0
         if conf >= confidence_threshold:
             safe_proposals.append(p)
 
