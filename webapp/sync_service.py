@@ -127,11 +127,24 @@ class SyncService(ABC):
 # Feature flags — controls which features are active.
 # In the future, these can be loaded from config.env or a dedicated flags file.
 FEATURE_FLAGS = {
-    "multi_cloud": False,        # Phase 2: multiple cloud providers
-    "ai_search": False,          # Phase 3: local LLM search
-    "duplicate_detection": False, # Phase 3: enhanced duplicate detection
-    "face_recognition": False,   # Phase 4: local facial recognition
-    "audit_logs": False,         # Phase 5: operation audit logging
+    # Phase 2
+    "multi_cloud": False,           # Multiple cloud providers (planned)
+
+    # Phase 3 — now implemented
+    "metadata_extraction": True,    # Python-first EXIF/audio/PDF metadata engine
+    "duplicate_detection": True,    # Enhanced: imagehash + BK-tree + certainty gate
+    "fuzzy_doc_duplicates": True,   # rapidfuzz document near-duplicate detection
+    "ocr": True,                    # Pillow + pytesseract OCR pipeline
+    "ai_search": True,              # Fuzzy (rapidfuzz) + semantic (pgvector) search
+    "embeddings": True,             # CLIP image + sentence-transformer text embeddings
+    "safety_thresholds": True,      # Certainty enforcement before any delete/move
+
+    # Phase 4
+    "face_recognition": False,      # Local facial recognition (planned)
+    "object_detection": False,      # Object/scene detection (planned)
+
+    # Phase 5
+    "audit_logs": False,            # Operation audit logging (planned)
 }
 
 

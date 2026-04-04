@@ -233,6 +233,70 @@ CREATE TABLE IF NOT EXISTS collection_files (
     PRIMARY KEY (collection_id, file_id)
 );
 
+-- ── Phase 3 additions ────────────────────────────────────────────────────
+
+-- Rich metadata extracted by Python (EXIF, audio tags, PDF info, MIME)
+-- Stored separately so it can be queried/indexed independently of files.metadata_json
+CREATE TABLE IF NOT EXISTS file_metadata (
+    id              BIGSERIAL PRIMARY KEY,
+    file_id         BIGINT REFERENCES files(id) ON DELETE CASCADE UNIQUE,
+    file_type       TEXT,                 -- 'image', 'audio', 'pdf', 'video', etc.
+    python_category TEXT,                 -- category from metadata_engine
+    python_confidence REAL DEFAULT 0,     -- 0.0-1.0 classification confidence
+    needs_ai        BOOLEAN DEFAULT TRUE, -- False when Python is fully confident
+    metadata        JSONB DEFAULT '{}',   -- full extracted metadata blob
+    extracted_at    TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_filemeta_file    ON file_metadata(file_id);
+CREATE INDEX IF NOT EXISTS idx_filemeta_type    ON file_metadata(file_type);
+CREATE INDEX IF NOT EXISTS idx_filemeta_cat     ON file_metadata(python_category);
+
+-- OCR text extracted from images and PDFs (pytesseract, pypdf)
+CREATE TABLE IF NOT EXISTS file_ocr_text (
+    id              BIGSERIAL PRIMARY KEY,
+    file_id         BIGINT REFERENCES files(id) ON DELETE CASCADE UNIQUE,
+    text_content    TEXT NOT NULL,
+    language        TEXT DEFAULT 'eng',
+    word_count      INT,
+    extracted_at    TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_ocr_file ON file_ocr_text(file_id);
+-- Full-text search index on OCR content
+CREATE INDEX IF NOT EXISTS idx_ocr_fts ON file_ocr_text
+    USING gin(to_tsvector('english', text_content));
+
+-- Vector embeddings for semantic search (requires pgvector extension)
+-- embed_type: 'image' (CLIP 512-dim) | 'text' (sentence-transformers 384-dim)
+DO $$ BEGIN
+    CREATE EXTENSION IF NOT EXISTS vector;
+EXCEPTION WHEN others THEN
+    RAISE NOTICE 'pgvector extension not available — file_embeddings will use JSONB fallback';
+END $$;
+
+CREATE TABLE IF NOT EXISTS file_embeddings (
+    id              BIGSERIAL PRIMARY KEY,
+    file_id         BIGINT REFERENCES files(id) ON DELETE CASCADE,
+    embed_type      TEXT NOT NULL,        -- 'image' or 'text'
+    model_name      TEXT NOT NULL,        -- e.g. 'clip-vit-base-patch32'
+    embedding_json  JSONB,                -- fallback when pgvector unavailable
+    created_at      TIMESTAMPTZ DEFAULT now(),
+    UNIQUE (file_id, embed_type)
+);
+CREATE INDEX IF NOT EXISTS idx_emb_file ON file_embeddings(file_id);
+CREATE INDEX IF NOT EXISTS idx_emb_type ON file_embeddings(embed_type);
+
+-- Try to add the pgvector column (safe no-op if extension missing)
+DO $$ BEGIN
+    ALTER TABLE file_embeddings ADD COLUMN IF NOT EXISTS
+        embedding vector(512);
+EXCEPTION WHEN undefined_object THEN
+    RAISE NOTICE 'pgvector not available — using JSONB for embeddings';
+END $$;
+
+-- IVFFlat index for fast ANN search (created after data is loaded)
+-- CREATE INDEX ON file_embeddings USING ivfflat (embedding vector_cosine_ops)
+--   WITH (lists = 100);  -- uncomment after >10k embeddings are stored
+
 -- Migration jobs tracking
 CREATE TABLE IF NOT EXISTS migration_jobs (
     id              TEXT PRIMARY KEY,
@@ -564,6 +628,147 @@ def get_migration_job(job_id):
         return cur.fetchone()
 
 
+# ---------------------------------------------------------------------------
+# Phase 3 CRUD: file_metadata, file_ocr_text, file_embeddings
+# ---------------------------------------------------------------------------
+
+def save_file_metadata(file_id: int, file_type: str, python_category: str,
+                       python_confidence: float, needs_ai: bool, metadata: dict):
+    """Upsert Python-extracted metadata for a file."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO file_metadata
+                (file_id, file_type, python_category, python_confidence, needs_ai, metadata)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (file_id) DO UPDATE SET
+                file_type         = EXCLUDED.file_type,
+                python_category   = EXCLUDED.python_category,
+                python_confidence = EXCLUDED.python_confidence,
+                needs_ai          = EXCLUDED.needs_ai,
+                metadata          = EXCLUDED.metadata,
+                extracted_at      = now()
+        """, (file_id, file_type, python_category,
+              python_confidence, needs_ai, json.dumps(metadata)))
+
+
+def get_file_metadata(file_id: int) -> dict:
+    """Return rich metadata for a file, or None."""
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM file_metadata WHERE file_id = %s", (file_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def save_ocr_text(file_id: int, text: str, lang: str = "eng"):
+    """Upsert OCR-extracted text for a file."""
+    word_count = len(text.split()) if text else 0
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO file_ocr_text (file_id, text_content, language, word_count)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (file_id) DO UPDATE SET
+                text_content = EXCLUDED.text_content,
+                language     = EXCLUDED.language,
+                word_count   = EXCLUDED.word_count,
+                extracted_at = now()
+        """, (file_id, text, lang, word_count))
+
+
+def get_ocr_text(file_id: int) -> dict:
+    """Return OCR text record for a file, or None."""
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM file_ocr_text WHERE file_id = %s", (file_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def save_file_embedding(file_id: int, embedding: list, embed_type: str = "image",
+                        model_name: str = None):
+    """Upsert a vector embedding for a file.
+
+    Stores in the vector column when pgvector is available, always stores
+    in embedding_json as a fallback.
+    """
+    if model_name is None:
+        model_name = ("clip-vit-base-patch32" if embed_type == "image"
+                      else "all-MiniLM-L6-v2")
+    emb_json = json.dumps(embedding)
+    # Try pgvector column first
+    try:
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO file_embeddings
+                    (file_id, embed_type, model_name, embedding, embedding_json)
+                VALUES (%s, %s, %s, %s::vector, %s)
+                ON CONFLICT (file_id, embed_type) DO UPDATE SET
+                    model_name     = EXCLUDED.model_name,
+                    embedding      = EXCLUDED.embedding,
+                    embedding_json = EXCLUDED.embedding_json,
+                    created_at     = now()
+            """, (file_id, embed_type, model_name,
+                  str(embedding), emb_json))
+    except Exception:
+        # pgvector unavailable — fall back to JSONB only
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO file_embeddings
+                    (file_id, embed_type, model_name, embedding_json)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (file_id, embed_type) DO UPDATE SET
+                    model_name     = EXCLUDED.model_name,
+                    embedding_json = EXCLUDED.embedding_json,
+                    created_at     = now()
+            """, (file_id, embed_type, model_name, emb_json))
+
+
+def search_by_vector(query_embedding: list, embed_type: str = "text",
+                     limit: int = 20) -> list:
+    """Return (file_id, file_path, similarity) tuples sorted by cosine similarity."""
+    try:
+        with get_conn() as conn:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute("""
+                SELECT f.id, f.file_path, f.file_name,
+                       1 - (e.embedding <=> %s::vector) AS similarity
+                FROM file_embeddings e
+                JOIN files f ON f.id = e.file_id
+                WHERE e.embed_type = %s AND e.embedding IS NOT NULL
+                ORDER BY similarity DESC
+                LIMIT %s
+            """, (str(query_embedding), embed_type, limit))
+            return [dict(r) for r in cur.fetchall()]
+    except Exception:
+        # pgvector not available
+        return []
+
+
+# Safety settings helpers
+
+def get_safety_settings() -> dict:
+    """Return the current safety/certainty threshold settings."""
+    defaults = {
+        "duplicate_certainty_threshold": 0.95,
+        "organize_certainty_threshold": 0.85,
+        "enable_auto_delete": False,
+        "require_human_confirmation_below": 1.0,
+    }
+    stored = get_preference("safety_settings", {})
+    return {**defaults, **(stored or {})}
+
+
+def save_safety_settings(settings: dict):
+    """Persist safety settings to preferences."""
+    current = get_safety_settings()
+    current.update(settings)
+    set_preference("safety_settings", current)
+
+
 def get_stats():
     """Get overview statistics."""
     with get_conn() as conn:
@@ -579,6 +784,13 @@ def get_stats():
         stats["active_rules"] = cur.fetchone()["total"]
         cur.execute("SELECT coalesce(sum(size_bytes),0) as total FROM files")
         stats["total_size_bytes"] = cur.fetchone()["total"]
+        # Phase 3 stats
+        cur.execute("SELECT count(*) as total FROM file_ocr_text")
+        stats["ocr_files"] = cur.fetchone()["total"]
+        cur.execute("SELECT count(*) as total FROM file_embeddings")
+        stats["embedded_files"] = cur.fetchone()["total"]
+        cur.execute("SELECT count(*) as total FROM file_metadata")
+        stats["metadata_extracted"] = cur.fetchone()["total"]
         # Extension breakdown
         cur.execute("""
             SELECT extension, count(*) as cnt

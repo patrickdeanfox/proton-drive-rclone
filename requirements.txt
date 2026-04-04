@@ -7,6 +7,28 @@ Pillow>=10.0.0
 numpy>=1.24.0
 gevent>=23.0.0
 gevent-websocket>=0.10.1
-# Optional — for local AI (CLIP model):
+
+# ── Python-first processing pipeline ───────────────────────────────────────
+imagehash>=4.3.1          # Perceptual hashing (pHash, dHash, aHash, wHash)
+rapidfuzz>=3.0.0          # Fast fuzzy string matching for doc duplicates
+mutagen>=1.47.0           # Audio metadata (ID3, FLAC, MP4, OGG tags)
+pypdf>=3.0.0              # PDF metadata + page count + text extraction
+filetype>=1.2.0           # Magic-bytes MIME detection (no system libmagic needed)
+pybktree>=1.0             # BK-tree for O(n log n) perceptual-hash search
+
+# ── OCR pipeline ───────────────────────────────────────────────────────────
+# Requires system packages: tesseract-ocr, poppler-utils
+pytesseract>=0.3.10       # OCR via Tesseract
+pdf2image>=1.16.0         # PDF page → PIL Image for OCR
+
+# ── Embeddings & vector search ─────────────────────────────────────────────
+# sentence-transformers requires torch; install separately if desired:
+# pip install sentence-transformers>=2.2.0
+pgvector>=0.2.0           # pgvector psycopg2 adapter for vector similarity
+
+# ── MCP server ─────────────────────────────────────────────────────────────
+mcp>=1.0.0                # Anthropic MCP SDK (stdio transport)
+
+# ── Optional — local AI (CLIP model) ───────────────────────────────────────
 # torch>=2.0.0
 # transformers>=4.30.0

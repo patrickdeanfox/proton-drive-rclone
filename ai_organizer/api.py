@@ -18,7 +18,11 @@ from .engines.ai_engine import (
 )
 from .engines.duplicate_engine import (
     find_exact_duplicates, find_near_duplicates, run_all_detection,
+    find_fuzzy_document_duplicates, resolve_duplicates,
 )
+from .engines.metadata_engine import batch_extract_metadata
+from .engines.ocr_engine import batch_ocr
+from .engines.search_engine import search_files_as_dicts
 from .engines.rclone_engine import (
     check_rclone, list_remotes, get_remote_about,
     get_transfer_stats, DEFAULT_SETTINGS as RCLONE_DEFAULTS,
@@ -324,8 +328,12 @@ def api_detect_duplicates():
         if mode == "exact":
             job_id = _run_bg("dup_exact", find_exact_duplicates)
         elif mode == "near":
-            threshold = data.get("threshold", 5)
+            threshold = int(data.get("threshold", 10))
             job_id = _run_bg("dup_near", find_near_duplicates, threshold=threshold)
+        elif mode == "fuzzy":
+            threshold = float(data.get("threshold", 0.85))
+            job_id = _run_bg("dup_fuzzy", find_fuzzy_document_duplicates,
+                             threshold=threshold)
         else:
             job_id = _run_bg("dup_all", run_all_detection)
         return jsonify({"ok": True, "job_id": job_id})
@@ -365,15 +373,30 @@ def api_dup_group_detail(group_id):
 
 @bp.route("/api/duplicates/resolve", methods=["POST"])
 def api_resolve_duplicate():
+    """Apply keep/delete decisions for a duplicate group.
+
+    Server-side certainty enforcement: any delete action with similarity
+    below the configured threshold is blocked and returned in 'blocked'.
+    """
     data = request.get_json(force=True)
     group_id = data.get("group_id")
     actions = data.get("actions", {})
 
     try:
-        for mid_str, keep in actions.items():
-            db.update_duplicate_member_keep(int(mid_str), keep)
-        db.update_duplicate_group_status(group_id, "resolved")
-        return jsonify({"ok": True})
+        result = resolve_duplicates(group_id, actions)
+        status_code = 200
+        if result.get("blocked"):
+            status_code = 422  # Unprocessable — some actions blocked
+        return jsonify({"ok": True, **result}), status_code
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/duplicates/settings", methods=["GET"])
+def api_dup_settings_get():
+    try:
+        settings = db.get_safety_settings()
+        return jsonify({"ok": True, "settings": settings})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -663,6 +686,166 @@ def api_files():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+# ── API: Phase 3 — Metadata ───────────────────────────────────────────
+
+@bp.route("/api/files/<int:file_id>/metadata")
+def api_file_metadata(file_id):
+    """Return rich Python-extracted metadata for a single file."""
+    try:
+        meta = db.get_file_metadata(file_id)
+        ocr = db.get_ocr_text(file_id)
+        result = {
+            "file_id": file_id,
+            "metadata": meta,
+            "ocr": {"word_count": ocr["word_count"], "language": ocr["language"]}
+                   if ocr else None,
+        }
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/metadata/extract", methods=["POST"])
+def api_metadata_extract():
+    """Trigger Python-first metadata extraction on all un-extracted files."""
+    try:
+        with db.get_conn() as conn:
+            import psycopg2.extras
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute("""
+                SELECT f.id, f.file_path FROM files f
+                LEFT JOIN file_metadata m ON m.file_id = f.id
+                WHERE m.id IS NULL
+                LIMIT 2000
+            """)
+            records = [dict(r) for r in cur.fetchall()]
+
+        job_id = _run_bg("metadata_extract", batch_extract_metadata,
+                         file_records=records, db_module=db)
+        return jsonify({"ok": True, "job_id": job_id, "queued": len(records)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ── API: Phase 3 — OCR ────────────────────────────────────────────────
+
+@bp.route("/api/ocr/scan", methods=["POST"])
+def api_ocr_scan():
+    """Trigger OCR on all un-OCR'd images and PDFs."""
+    data = request.get_json(force=True) if request.is_json else {}
+    lang = data.get("lang", "eng")
+    try:
+        with db.get_conn() as conn:
+            import psycopg2.extras
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute("""
+                SELECT f.id, f.file_path FROM files f
+                LEFT JOIN file_ocr_text o ON o.file_id = f.id
+                WHERE o.id IS NULL
+                  AND (f.mime_type LIKE 'image/%%' OR f.mime_type = 'application/pdf'
+                       OR f.extension IN ('.png','.jpg','.jpeg','.tiff','.tif',
+                                          '.bmp','.gif','.webp','.pdf'))
+                LIMIT 1000
+            """)
+            records = [dict(r) for r in cur.fetchall()]
+
+        job_id = _run_bg("ocr_scan", batch_ocr,
+                         file_records=records, lang=lang, db_module=db)
+        return jsonify({"ok": True, "job_id": job_id, "queued": len(records)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/ocr/results/<int:file_id>")
+def api_ocr_results(file_id):
+    """Return OCR text for a specific file."""
+    try:
+        result = db.get_ocr_text(file_id)
+        if result:
+            d = dict(result)
+            if d.get("extracted_at") and isinstance(d["extracted_at"], datetime):
+                d["extracted_at"] = d["extracted_at"].isoformat()
+            return jsonify({"ok": True, "ocr": d})
+        return jsonify({"ok": False, "error": "No OCR data found"}), 404
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/ocr/search")
+def api_ocr_search():
+    """Fuzzy full-text search across OCR'd file content (rapidfuzz)."""
+    query = request.args.get("q", "").strip()
+    limit = int(request.args.get("limit", 20))
+    if not query:
+        return jsonify({"ok": False, "error": "query required"}), 400
+    try:
+        results = search_files_as_dicts(query, mode="text", limit=limit, db_module=db)
+        return jsonify({"ok": True, "results": results, "query": query})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ── API: Phase 3 — Semantic Search ────────────────────────────────────
+
+@bp.route("/api/search")
+def api_search():
+    """Search files by content.
+
+    ?q=...        — search query (required)
+    ?mode=hybrid  — text | semantic | hybrid (default: hybrid)
+    ?limit=20     — max results
+    """
+    query = request.args.get("q", "").strip()
+    mode = request.args.get("mode", "hybrid")
+    limit = int(request.args.get("limit", 20))
+    if not query:
+        return jsonify({"ok": False, "error": "query required"}), 400
+    try:
+        results = search_files_as_dicts(query, mode=mode, limit=limit, db_module=db)
+        return jsonify({"ok": True, "results": results, "query": query, "mode": mode})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ── API: Phase 3 — Safety Settings ────────────────────────────────────
+
+@bp.route("/api/safety/settings", methods=["GET"])
+def api_safety_settings_get():
+    """Return the current safety/certainty threshold configuration."""
+    try:
+        settings = db.get_safety_settings()
+        return jsonify({"ok": True, "settings": settings})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/safety/settings", methods=["PUT"])
+def api_safety_settings_put():
+    """Update safety/certainty threshold settings.
+
+    Accepted keys:
+      duplicate_certainty_threshold  float  0.0–1.0  (default 0.95)
+      organize_certainty_threshold   float  0.0–1.0  (default 0.85)
+      enable_auto_delete             bool   (default false)
+      require_human_confirmation_below float (default 1.0)
+    """
+    data = request.get_json(force=True)
+    allowed_keys = {
+        "duplicate_certainty_threshold",
+        "organize_certainty_threshold",
+        "enable_auto_delete",
+        "require_human_confirmation_below",
+    }
+    filtered = {k: v for k, v in data.items() if k in allowed_keys}
+    if not filtered:
+        return jsonify({"ok": False, "error": "No valid settings keys provided"}), 400
+    try:
+        db.save_safety_settings(filtered)
+        return jsonify({"ok": True, "saved": filtered})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 # ── API: Extensions (placeholders) ────────────────────────────────────
 
 @bp.route("/api/extensions")
@@ -694,7 +877,7 @@ def api_extensions():
             "id": "search",
             "name": "Semantic Search",
             "description": "Search files by content, description, or visual similarity.",
-            "status": "planned",
+            "status": "active",
             "icon": "🔎",
         },
         {
