@@ -291,6 +291,89 @@ def _tool_propose_organization(path: str,
     }
 
 
+def _tool_count_files(query: str = "", scope: str = "all") -> dict:
+    """Answer 'how many X files?' queries with SQL aggregates."""
+    from ai_organizer.engines.query_engine import answer_question
+    db = _get_db()
+    result = answer_question(query or "how many files?", db_module=db)
+    return result
+
+
+def _tool_describe_collection(path: str = "/") -> dict:
+    """Generate an LLM summary of the files under a directory path."""
+    db = _get_db()
+    # Get stats for the path prefix
+    path_escaped = path.replace("%", "\\%").replace("_", "\\_")
+    try:
+        with db.get_conn() as conn:
+            import psycopg2.extras as _pge
+            cur = conn.cursor(cursor_factory=_pge.RealDictCursor)
+            cur.execute("""
+                SELECT count(*) as total,
+                       coalesce(sum(size_bytes),0) as total_bytes,
+                       count(distinct extension) as ext_count
+                FROM files WHERE file_path LIKE %s ESCAPE '\\'
+            """, [path_escaped + "%"])
+            row = dict(cur.fetchone())
+    except Exception as e:
+        return {"error": str(e)}
+
+    # Get top extensions
+    try:
+        with db.get_conn() as conn:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute("""
+                SELECT extension, count(*) as cnt
+                FROM files WHERE file_path LIKE %s ESCAPE '\\'
+                GROUP BY extension ORDER BY cnt DESC LIMIT 5
+            """, [path_escaped + "%"])
+            top_exts = [dict(r) for r in cur.fetchall()]
+    except Exception:
+        top_exts = []
+
+    row["top_extensions"] = top_exts
+    row["path"] = path
+
+    # LLM narrative
+    narrative = None
+    try:
+        from ai_organizer.llm.task_router import get_router
+        narrative = get_router().run_task(
+            "agent_narrative",
+            f"Describe a file collection at path '{path}'.",
+            context={"total_files": row["total"], "total_bytes": row["total_bytes"],
+                     "top_types": ", ".join(r["extension"] or "?" for r in top_exts[:5])}
+        )
+    except Exception:
+        pass
+
+    row["description"] = narrative or (
+        f"{row['total']} files ({row['total_bytes']/1024/1024:.1f} MB) "
+        f"with {row['ext_count']} different file types."
+    )
+    return row
+
+
+def _tool_answer_question(question: str, scope: str = "all") -> dict:
+    """Dispatch a natural-language file question to the query engine."""
+    from ai_organizer.engines.query_engine import answer_question
+    db = _get_db()
+    return answer_question(question, db_module=db)
+
+
+def _tool_list_faces() -> dict:
+    """Return detected face clusters with representative image paths."""
+    db = _get_db()
+    try:
+        clusters = db.get_face_clusters()
+        return {
+            "count": len(clusters),
+            "clusters": clusters,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ---------------------------------------------------------------------------
 # MCP server definition
 # ---------------------------------------------------------------------------
@@ -426,6 +509,72 @@ TOOLS = [
             "required": ["path"],
         },
     ),
+    Tool(
+        name="count_files",
+        description=(
+            "Count files matching a natural-language description. "
+            "Examples: 'PDF files', 'images from last year', 'all files'. "
+            "Returns count and a human-readable answer."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Natural-language description of files to count",
+                },
+            },
+            "required": ["query"],
+        },
+    ),
+    Tool(
+        name="describe_collection",
+        description=(
+            "Generate a natural-language description of the files under a path. "
+            "Includes file counts, sizes, top types, and an LLM summary."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "default": "/",
+                    "description": "Directory path to describe",
+                },
+            },
+            "required": ["path"],
+        },
+    ),
+    Tool(
+        name="answer_question",
+        description=(
+            "Answer a natural-language question about your files. "
+            "Supports: counting, searching, describing, storage usage, file type breakdowns. "
+            "Examples: 'How many PDFs do I have?', 'Find files about invoices', "
+            "'How much storage am I using?', 'What types of files do I have?'"
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "Plain-English question about your files",
+                },
+            },
+            "required": ["question"],
+        },
+    ),
+    Tool(
+        name="list_faces",
+        description=(
+            "List detected face clusters from facial recognition. "
+            "Returns person clusters with suggested names and representative image paths."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {},
+        },
+    ),
 ]
 
 # ---------------------------------------------------------------------------
@@ -473,6 +622,20 @@ async def _run_server():
                         arguments.get("confidence_threshold", 0.85)
                     ),
                 )
+            elif name == "count_files":
+                result = _tool_count_files(
+                    query=arguments.get("query", "how many files?"),
+                )
+            elif name == "describe_collection":
+                result = _tool_describe_collection(
+                    path=arguments.get("path", "/"),
+                )
+            elif name == "answer_question":
+                result = _tool_answer_question(
+                    question=arguments["question"],
+                )
+            elif name == "list_faces":
+                result = _tool_list_faces()
             else:
                 result = {"error": f"Unknown tool: {name}"}
         except Exception as e:

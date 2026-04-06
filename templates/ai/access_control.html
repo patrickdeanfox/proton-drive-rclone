@@ -1,0 +1,232 @@
+{% extends "ai/base_ai.html" %}
+{% block title %}Access Control{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h2>AI Access Control</h2>
+    <p class="subtitle">Limit which files and folders the AI can access</p>
+</div>
+
+<div class="grid" style="grid-template-columns:1fr 1fr;gap:20px;">
+
+    <!-- Current scope -->
+    <div class="card">
+        <div class="card-header">
+            <span>Active Scope</span>
+            <span id="scopeStatus" class="badge badge-info">loading…</span>
+        </div>
+        <div class="card-body">
+            <div id="currentScope" style="font-size:13px;color:var(--text-muted);">Loading…</div>
+        </div>
+    </div>
+
+    <!-- Path check tool -->
+    <div class="card">
+        <div class="card-header"><span>Path Check</span></div>
+        <div class="card-body">
+            <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px;">
+                Test whether a path is allowed by the active scope.
+            </p>
+            <div style="display:flex;gap:8px;">
+                <input type="text" id="checkPathInput" placeholder="/home/user/photos/img.jpg"
+                       style="flex:1;padding:8px;border:1px solid var(--border);border-radius:6px;
+                              background:var(--bg-secondary);color:var(--text);font-size:13px;">
+                <button class="btn btn-secondary btn-sm" onclick="checkPath()">Check</button>
+            </div>
+            <div id="checkResult" style="margin-top:10px;font-size:13px;"></div>
+        </div>
+    </div>
+
+</div>
+
+<!-- Scope editor -->
+<div class="card" style="margin-top:20px;">
+    <div class="card-header"><span>Edit Scope</span></div>
+    <div class="card-body">
+        <form id="scopeForm">
+            <div class="form-group">
+                <label>Scope Name</label>
+                <input type="text" id="scopeName" class="form-control" placeholder="default" value="default">
+            </div>
+
+            <div class="form-group" style="margin-top:16px;">
+                <label>Allowed Local Paths</label>
+                <p style="font-size:12px;color:var(--text-muted);margin:4px 0 8px;">
+                    One path prefix per line. Leave empty to allow all local paths.
+                </p>
+                <textarea id="allowedPaths" class="form-control" rows="4"
+                          placeholder="/home/user/photos&#10;/home/user/documents"></textarea>
+            </div>
+
+            <div class="form-group" style="margin-top:16px;">
+                <label>Allowed Remotes</label>
+                <p style="font-size:12px;color:var(--text-muted);margin:4px 0 8px;">
+                    Comma-separated rclone remote names. Leave empty to allow all remotes.
+                </p>
+                <input type="text" id="allowedRemotes" class="form-control"
+                       placeholder="protondrive, dropbox">
+                <div id="remotesList" style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px;"></div>
+            </div>
+
+            <div class="form-group" style="margin-top:16px;">
+                <label>Blocked Patterns</label>
+                <p style="font-size:12px;color:var(--text-muted);margin:4px 0 8px;">
+                    One glob pattern per line. Matching files will be excluded.
+                </p>
+                <textarea id="blockedPatterns" class="form-control" rows="3"
+                          placeholder="*.tmp&#10;*/.git/*&#10;*/node_modules/*"></textarea>
+            </div>
+
+            <div class="form-group" style="margin-top:16px;display:flex;align-items:center;gap:8px;">
+                <input type="checkbox" id="scopeEnabled" checked style="width:16px;height:16px;">
+                <label for="scopeEnabled" style="margin:0;cursor:pointer;">Enable this scope (enforce restrictions)</label>
+            </div>
+
+            <div style="margin-top:20px;display:flex;gap:10px;">
+                <button type="button" class="btn btn-primary" onclick="saveScope()">Save Scope</button>
+                <button type="button" class="btn btn-secondary" onclick="clearScope()">Clear (Allow All)</button>
+            </div>
+        </form>
+        <div id="scopeSaveResult" style="margin-top:12px;font-size:13px;"></div>
+    </div>
+</div>
+
+<script>
+async function loadScope() {
+    try {
+        const resp = await fetch('/ai/api/access/scope');
+        const data = await resp.json();
+        const scope = data.scope;
+        const statusEl = document.getElementById('scopeStatus');
+        const currentEl = document.getElementById('currentScope');
+
+        if (!scope) {
+            statusEl.textContent = 'unrestricted';
+            statusEl.className = 'badge badge-success';
+            currentEl.textContent = 'No active scope — AI can access all files.';
+            return;
+        }
+
+        statusEl.textContent = scope.enabled ? 'active' : 'disabled';
+        statusEl.className = 'badge ' + (scope.enabled ? 'badge-warning' : 'badge-secondary');
+
+        const paths = (scope.allowed_paths || []).join('\n') || '(all)';
+        const remotes = (scope.allowed_remotes || []).join(', ') || '(all)';
+        const blocked = (scope.blocked_patterns || []).join('\n') || '(none)';
+        currentEl.innerHTML = `<strong>Name:</strong> ${scope.scope_name || 'default'}<br>
+            <strong>Allowed paths:</strong> ${paths.replace(/\n/g,'<br>')}<br>
+            <strong>Allowed remotes:</strong> ${remotes}<br>
+            <strong>Blocked patterns:</strong> ${blocked}`;
+
+        // Populate form
+        document.getElementById('scopeName').value = scope.scope_name || 'default';
+        document.getElementById('allowedPaths').value = (scope.allowed_paths || []).join('\n');
+        document.getElementById('allowedRemotes').value = (scope.allowed_remotes || []).join(', ');
+        document.getElementById('blockedPatterns').value = (scope.blocked_patterns || []).join('\n');
+        document.getElementById('scopeEnabled').checked = scope.enabled !== false;
+        if (scope.id) document.getElementById('scopeForm').dataset.scopeId = scope.id;
+    } catch (e) {
+        document.getElementById('currentScope').textContent = 'Error loading scope: ' + e.message;
+    }
+}
+
+async function loadRemotes() {
+    try {
+        const resp = await fetch('/ai/api/rclone/remotes');
+        const data = await resp.json();
+        if (data.remotes) {
+            const container = document.getElementById('remotesList');
+            data.remotes.forEach(r => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'badge badge-info';
+                btn.style.cursor = 'pointer';
+                btn.textContent = r.name || r;
+                btn.onclick = () => {
+                    const inp = document.getElementById('allowedRemotes');
+                    const current = inp.value.split(',').map(s => s.trim()).filter(Boolean);
+                    const name = r.name || r;
+                    if (!current.includes(name)) {
+                        current.push(name);
+                        inp.value = current.join(', ');
+                    }
+                };
+                container.appendChild(btn);
+            });
+        }
+    } catch (e) { /* remotes list optional */ }
+}
+
+async function saveScope() {
+    const paths = document.getElementById('allowedPaths').value
+        .split('\n').map(s => s.trim()).filter(Boolean);
+    const remotes = document.getElementById('allowedRemotes').value
+        .split(',').map(s => s.trim()).filter(Boolean);
+    const blocked = document.getElementById('blockedPatterns').value
+        .split('\n').map(s => s.trim()).filter(Boolean);
+
+    const payload = {
+        scope_name: document.getElementById('scopeName').value || 'default',
+        allowed_paths: paths,
+        allowed_remotes: remotes,
+        blocked_patterns: blocked,
+        enabled: document.getElementById('scopeEnabled').checked,
+    };
+    const existingId = document.getElementById('scopeForm').dataset.scopeId;
+    if (existingId) payload.id = parseInt(existingId);
+
+    try {
+        const resp = await fetch('/ai/api/access/scope', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        const resultEl = document.getElementById('scopeSaveResult');
+        if (data.ok) {
+            resultEl.innerHTML = '<span style="color:var(--success)">Scope saved successfully.</span>';
+            loadScope();
+        } else {
+            resultEl.innerHTML = '<span style="color:var(--danger)">Error: ' + data.error + '</span>';
+        }
+    } catch (e) {
+        document.getElementById('scopeSaveResult').innerHTML =
+            '<span style="color:var(--danger)">Error: ' + e.message + '</span>';
+    }
+}
+
+async function clearScope() {
+    if (!confirm('Clear the active scope? This allows AI access to all files.')) return;
+    try {
+        await fetch('/ai/api/access/scope', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ allowed_paths: [], allowed_remotes: [], blocked_patterns: [], enabled: false }),
+        });
+        document.getElementById('scopeSaveResult').innerHTML =
+            '<span style="color:var(--success)">Scope cleared — all files accessible.</span>';
+        loadScope();
+    } catch (e) {}
+}
+
+async function checkPath() {
+    const path = document.getElementById('checkPathInput').value.trim();
+    if (!path) return;
+    try {
+        const resp = await fetch('/ai/api/access/check?path=' + encodeURIComponent(path));
+        const data = await resp.json();
+        const el = document.getElementById('checkResult');
+        if (data.allowed) {
+            el.innerHTML = '<span style="color:var(--success)">Allowed</span>';
+        } else {
+            el.innerHTML = '<span style="color:var(--danger)">Blocked by active scope</span>';
+        }
+    } catch (e) {
+        document.getElementById('checkResult').textContent = 'Error: ' + e.message;
+    }
+}
+
+loadScope();
+loadRemotes();
+</script>
+{% endblock %}

@@ -29,6 +29,15 @@ pgvector>=0.2.0           # pgvector psycopg2 adapter for vector similarity
 # ── MCP server ─────────────────────────────────────────────────────────────
 mcp>=1.0.0                # Anthropic MCP SDK (stdio transport)
 
+# ── Phase 4: local LLM + agentic workflows ─────────────────────────────────
+# Ollama client uses stdlib urllib only — no extra package needed.
+# Install Ollama separately: https://ollama.ai
+
+# ── Phase 4: facial recognition ────────────────────────────────────────────
+# Requires system packages: none (pure Python)
+mediapipe>=0.10.0         # Face detection (CPU, no GPU required)
+scikit-learn>=1.3.0       # DBSCAN clustering for face embeddings
+
 # ── Optional — local AI (CLIP model) ───────────────────────────────────────
 # torch>=2.0.0
 # transformers>=4.30.0

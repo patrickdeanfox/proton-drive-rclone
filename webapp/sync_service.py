@@ -139,8 +139,12 @@ FEATURE_FLAGS = {
     "embeddings": True,             # CLIP image + sentence-transformer text embeddings
     "safety_thresholds": True,      # Certainty enforcement before any delete/move
 
-    # Phase 4
-    "face_recognition": False,      # Local facial recognition (planned)
+    # Phase 4 — now implemented
+    "face_recognition": True,       # mediapipe face detection + CLIP embeddings + DBSCAN clustering
+    "local_llm": True,              # Ollama-based local LLM routing (graceful degradation)
+    "nl_qa": True,                  # Natural language Q&A chat interface
+    "agentic_workflows": True,      # Multi-step agent orchestration (sync_health, compare, etc.)
+    "access_control": True,         # AI access scopes (allowed paths/remotes)
     "object_detection": False,      # Object/scene detection (planned)
 
     # Phase 5

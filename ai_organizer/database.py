@@ -320,6 +320,61 @@ CREATE TABLE IF NOT EXISTS migration_jobs (
     finished_at     TIMESTAMPTZ,
     created_at      TIMESTAMPTZ DEFAULT now()
 );
+-- Phase 4 migration additions (safe ALTER — idempotent)
+ALTER TABLE migration_jobs ADD COLUMN IF NOT EXISTS state_json JSONB DEFAULT '{}';
+ALTER TABLE migration_jobs ADD COLUMN IF NOT EXISTS conflict_strategy VARCHAR(20) DEFAULT 'skip';
+ALTER TABLE migration_jobs ADD COLUMN IF NOT EXISTS bytes_checkpoint BIGINT DEFAULT 0;
+ALTER TABLE migration_jobs ADD COLUMN IF NOT EXISTS conflict_count INT DEFAULT 0;
+
+-- ── Phase 4 additions ────────────────────────────────────────────────────
+
+-- Chat / Q&A history
+CREATE TABLE IF NOT EXISTS chat_history (
+    id              BIGSERIAL PRIMARY KEY,
+    session_id      VARCHAR(64),
+    role            VARCHAR(10) NOT NULL,  -- 'user' | 'assistant'
+    message         TEXT NOT NULL,
+    query_type      VARCHAR(30),           -- 'count','search','describe', etc.
+    result_count    INT DEFAULT 0,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_history(session_id);
+
+-- AI access control scopes
+CREATE TABLE IF NOT EXISTS ai_access_scopes (
+    id              BIGSERIAL PRIMARY KEY,
+    scope_name      VARCHAR(100) NOT NULL DEFAULT 'default',
+    allowed_paths   TEXT[] DEFAULT '{}',    -- local path prefixes
+    allowed_remotes TEXT[] DEFAULT '{}',    -- rclone remote names (empty = all)
+    blocked_patterns TEXT[] DEFAULT '{}',   -- glob patterns to exclude
+    enabled         BOOL DEFAULT TRUE,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Facial recognition
+CREATE TABLE IF NOT EXISTS face_clusters (
+    id                      BIGSERIAL PRIMARY KEY,
+    suggested_name          VARCHAR(200) DEFAULT 'Unknown',
+    face_count              INT DEFAULT 0,
+    representative_file_id  BIGINT REFERENCES files(id) ON DELETE SET NULL,
+    created_at              TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS face_detections (
+    id              BIGSERIAL PRIMARY KEY,
+    file_id         BIGINT REFERENCES files(id) ON DELETE CASCADE,
+    face_index      INT DEFAULT 0,
+    bounding_box    JSONB DEFAULT '{}',
+    cluster_id      BIGINT REFERENCES face_clusters(id) ON DELETE SET NULL,
+    detected_at     TIMESTAMPTZ DEFAULT NOW()
+);
+DO $$ BEGIN
+    ALTER TABLE face_detections ADD COLUMN IF NOT EXISTS embedding vector(512);
+EXCEPTION WHEN undefined_object THEN
+    RAISE NOTICE 'pgvector not available for face_detections';
+END $$;
+CREATE INDEX IF NOT EXISTS idx_face_file    ON face_detections(file_id);
+CREATE INDEX IF NOT EXISTS idx_face_cluster ON face_detections(cluster_id);
 
 -- Progress snapshots for operations
 CREATE TABLE IF NOT EXISTS progress_snapshots (
@@ -806,4 +861,188 @@ def get_stats():
             GROUP BY extension ORDER BY cnt DESC LIMIT 10
         """)
         stats["top_extensions"] = cur.fetchall()
+        # Phase 4 stats
+        try:
+            cur.execute("SELECT count(*) FROM chat_history WHERE role = 'user'")
+            stats["chat_queries"] = cur.fetchone()[0]
+            cur.execute("SELECT count(*) FROM face_detections")
+            stats["faces_detected"] = cur.fetchone()[0]
+            cur.execute("SELECT count(*) FROM face_clusters")
+            stats["face_clusters"] = cur.fetchone()[0]
+        except Exception:
+            pass
         return stats
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 CRUD: chat_history, ai_access_scopes, face_detections
+# ---------------------------------------------------------------------------
+
+def save_chat_message(session_id: str, role: str, message: str,
+                      query_type: str = None, result_count: int = 0) -> int:
+    """Persist a chat turn. Returns the new row id."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO chat_history (session_id, role, message, query_type, result_count)
+            VALUES (%s, %s, %s, %s, %s) RETURNING id
+        """, (session_id, role, message, query_type, result_count))
+        return cur.fetchone()[0]
+
+
+def get_chat_history(session_id: str, limit: int = 50) -> list:
+    """Return recent chat turns for a session."""
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT id, role, message, query_type, result_count, created_at
+            FROM chat_history WHERE session_id = %s
+            ORDER BY created_at ASC LIMIT %s
+        """, (session_id, limit))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def get_active_scope() -> dict | None:
+    """Return the first enabled access scope, or None (unrestricted)."""
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM ai_access_scopes WHERE enabled = TRUE LIMIT 1")
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def save_scope(scope: dict) -> int:
+    """Upsert an access scope (uses id if present). Returns scope id."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        if scope.get("id"):
+            cur.execute("""
+                UPDATE ai_access_scopes
+                SET scope_name = %s, allowed_paths = %s, allowed_remotes = %s,
+                    blocked_patterns = %s, enabled = %s
+                WHERE id = %s RETURNING id
+            """, (scope.get("scope_name", "default"),
+                  scope.get("allowed_paths", []),
+                  scope.get("allowed_remotes", []),
+                  scope.get("blocked_patterns", []),
+                  scope.get("enabled", True),
+                  scope["id"]))
+        else:
+            cur.execute("""
+                INSERT INTO ai_access_scopes
+                    (scope_name, allowed_paths, allowed_remotes, blocked_patterns, enabled)
+                VALUES (%s, %s, %s, %s, %s) RETURNING id
+            """, (scope.get("scope_name", "default"),
+                  scope.get("allowed_paths", []),
+                  scope.get("allowed_remotes", []),
+                  scope.get("blocked_patterns", []),
+                  scope.get("enabled", True)))
+        return cur.fetchone()[0]
+
+
+def path_allowed(filepath: str, scope: dict = None) -> bool:
+    """Return True if filepath is permitted by the given scope (or all scopes if None).
+
+    Rules:
+    - If no scope is active (scope is None), everything is allowed.
+    - If allowed_paths is empty, all local paths are allowed.
+    - If allowed_paths is non-empty, filepath must start with at least one entry.
+    - If blocked_patterns is non-empty, filepath must not match any entry (fnmatch).
+    """
+    import fnmatch
+    if scope is None:
+        return True
+    allowed = scope.get("allowed_paths") or []
+    blocked = scope.get("blocked_patterns") or []
+    if allowed and not any(filepath.startswith(p) for p in allowed):
+        return False
+    if any(fnmatch.fnmatch(filepath, pat) for pat in blocked):
+        return False
+    return True
+
+
+def save_face_cluster(suggested_name: str, representative_file_id: int = None) -> int:
+    """Create a new face cluster. Returns cluster id."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO face_clusters (suggested_name, representative_file_id)
+            VALUES (%s, %s) RETURNING id
+        """, (suggested_name, representative_file_id))
+        return cur.fetchone()[0]
+
+
+def update_face_cluster(cluster_id: int, suggested_name: str = None,
+                         face_count: int = None,
+                         representative_file_id: int = None):
+    """Update a face cluster record."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        sets, params = [], []
+        if suggested_name is not None:
+            sets.append("suggested_name = %s"); params.append(suggested_name)
+        if face_count is not None:
+            sets.append("face_count = %s"); params.append(face_count)
+        if representative_file_id is not None:
+            sets.append("representative_file_id = %s"); params.append(representative_file_id)
+        if sets:
+            params.append(cluster_id)
+            cur.execute(f"UPDATE face_clusters SET {', '.join(sets)} WHERE id = %s", params)
+
+
+def save_face_detection(file_id: int, face_index: int, bounding_box: dict,
+                         embedding: list = None, cluster_id: int = None) -> int:
+    """Save a detected face. Returns detection id."""
+    emb_str = str(embedding) if embedding else None
+    with get_conn() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("""
+                INSERT INTO face_detections (file_id, face_index, bounding_box, embedding, cluster_id)
+                VALUES (%s, %s, %s, %s::vector, %s) RETURNING id
+            """, (file_id, face_index, json.dumps(bounding_box), emb_str, cluster_id))
+        except Exception:
+            cur.execute("""
+                INSERT INTO face_detections (file_id, face_index, bounding_box, cluster_id)
+                VALUES (%s, %s, %s, %s) RETURNING id
+            """, (file_id, face_index, json.dumps(bounding_box), cluster_id))
+        return cur.fetchone()[0]
+
+
+def get_face_clusters() -> list:
+    """Return all face clusters with member counts."""
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT fc.*, f.file_path as rep_path
+            FROM face_clusters fc
+            LEFT JOIN files f ON f.id = fc.representative_file_id
+            ORDER BY fc.face_count DESC
+        """)
+        return [dict(r) for r in cur.fetchall()]
+
+
+def get_face_detections_for_file(file_id: int) -> list:
+    """Return all face detections for a file."""
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT fd.*, fc.suggested_name as cluster_name
+            FROM face_detections fd
+            LEFT JOIN face_clusters fc ON fc.id = fd.cluster_id
+            WHERE fd.file_id = %s ORDER BY fd.face_index
+        """, (file_id,))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def update_migration_job_state(job_id: str, state: dict):
+    """Persist migration state_json for pause/resume checkpointing."""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE migration_jobs
+            SET state_json = %s, bytes_checkpoint = %s
+            WHERE id = %s
+        """, (json.dumps(state),
+              state.get("bytes_done", 0),
+              job_id))

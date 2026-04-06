@@ -34,8 +34,9 @@ from .engines.rclone_engine import (
 from .engines.migration_engine import (
     check_dropbox_remote, configure_dropbox_remote, test_dropbox_connection,
     browse_remote, get_folder_size, dry_run_migration, start_migration,
-    cancel_migration, get_migration_status, get_migration_logs,
-    list_active_migrations,
+    cancel_migration, pause_migration, resume_migration,
+    get_migration_status, get_migration_logs, list_active_migrations,
+    validate_endpoints,
 )
 from .utils.yaml_rules import import_rules_from_yaml, export_rules_to_yaml
 from .progress import (
@@ -947,3 +948,306 @@ def api_extensions():
         },
     ]
     return jsonify({"ok": True, "extensions": extensions})
+
+
+# ── Phase 4 pages ─────────────────────────────────────────────────────────
+
+@bp.route("/chat")
+def chat_page():
+    return render_template("ai/chat.html", active="ai_chat")
+
+
+@bp.route("/agents")
+def agents_page():
+    return render_template("ai/agents.html", active="ai_agents")
+
+
+@bp.route("/access-control")
+def access_control_page():
+    return render_template("ai/access_control.html", active="ai_access")
+
+
+# ── API: Migration pause/resume ───────────────────────────────────────────
+
+@bp.route("/api/migration/<migration_id>/pause", methods=["POST"])
+def api_migration_pause(migration_id):
+    result = pause_migration(migration_id)
+    if result["ok"]:
+        return jsonify(result)
+    return jsonify(result), 400
+
+
+@bp.route("/api/migration/<migration_id>/resume", methods=["POST"])
+def api_migration_resume(migration_id):
+    result = resume_migration(migration_id)
+    if result["ok"]:
+        return jsonify(result)
+    return jsonify(result), 400
+
+
+@bp.route("/api/migration/<migration_id>/status")
+def api_migration_status_detail(migration_id):
+    status = get_migration_status(migration_id)
+    if status is None:
+        # Fall back to DB record
+        try:
+            record = db.get_migration_job(migration_id)
+            if record:
+                d = dict(record)
+                for k in ("started_at", "finished_at", "created_at"):
+                    if d.get(k) and isinstance(d[k], datetime):
+                        d[k] = d[k].isoformat()
+                return jsonify({"ok": True, "source": "db", **d})
+        except Exception:
+            pass
+        return jsonify({"ok": False, "error": "Migration not found"}), 404
+    return jsonify({"ok": True, **status})
+
+
+@bp.route("/api/migration/validate", methods=["POST"])
+def api_migration_validate():
+    data = request.get_json(force=True)
+    source = data.get("source_remote")
+    dest = data.get("dest_remote")
+    if not source or not dest:
+        return jsonify({"ok": False, "error": "source_remote and dest_remote required"}), 400
+    try:
+        result = validate_endpoints(source, dest)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ── API: Chat / NL Q&A ────────────────────────────────────────────────────
+
+@bp.route("/api/chat/message", methods=["POST"])
+def api_chat_message():
+    data = request.get_json(force=True)
+    message = (data.get("message") or "").strip()
+    if not message:
+        return jsonify({"ok": False, "error": "message is required"}), 400
+
+    session_id = data.get("session_id") or str(uuid.uuid4())
+    scope_filter = data.get("scope", "all")  # 'local' | 'proton' | 'all'
+
+    # Load active access scope
+    scope = None
+    try:
+        scope = db.get_active_scope()
+        if scope and scope_filter == "local":
+            # Restrict to local paths only (no remotes)
+            scope = dict(scope)
+            scope["allowed_remotes"] = []
+    except Exception:
+        pass
+
+    try:
+        from .engines.query_engine import answer_question
+        result = answer_question(message, db_module=db, scope=scope)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    # Persist to chat history
+    try:
+        db.save_chat_message(session_id, "user", message)
+        db.save_chat_message(
+            session_id, "assistant", result.get("answer", ""),
+            query_type=result.get("query_type"),
+            result_count=len(result.get("files", []))
+        )
+    except Exception:
+        pass
+
+    return jsonify({"ok": True, "session_id": session_id, **result})
+
+
+@bp.route("/api/chat/history")
+def api_chat_history():
+    session_id = request.args.get("session_id", "")
+    if not session_id:
+        return jsonify({"ok": False, "error": "session_id required"}), 400
+    try:
+        history = db.get_chat_history(session_id)
+        return jsonify({"ok": True, "session_id": session_id, "history": history})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ── API: Agents / Workflows ───────────────────────────────────────────────
+
+@bp.route("/api/agents/workflows")
+def api_agents_workflows():
+    from .agents.agent_runner import WORKFLOW_SCHEMAS
+    return jsonify({"ok": True, "workflows": WORKFLOW_SCHEMAS})
+
+
+@bp.route("/api/agents/run", methods=["POST"])
+def api_agents_run():
+    data = request.get_json(force=True)
+    workflow = data.get("workflow")
+    params = data.get("params", {})
+    if not workflow:
+        return jsonify({"ok": False, "error": "workflow is required"}), 400
+
+    from .agents.agent_runner import AgentRunner, WORKFLOW_SCHEMAS
+    if workflow not in WORKFLOW_SCHEMAS:
+        return jsonify({"ok": False, "error": f"Unknown workflow: {workflow}",
+                        "available": list(WORKFLOW_SCHEMAS.keys())}), 400
+
+    def _run_agent(job_id=None, **kw):
+        runner = AgentRunner(db_module=db)
+        result = runner.run_workflow(workflow, params, job_id=job_id)
+        try:
+            db.update_job(job_id, status="completed", result=result)
+        except Exception:
+            pass
+
+    job_id = _run_bg(f"agent_{workflow}", _run_agent)
+    db.create_job(job_id, f"agent_{workflow}")
+    return jsonify({"ok": True, "job_id": job_id, "workflow": workflow})
+
+
+# ── API: Access Control ───────────────────────────────────────────────────
+
+@bp.route("/api/access/scope", methods=["GET"])
+def api_get_scope():
+    try:
+        scope = db.get_active_scope()
+        return jsonify({"ok": True, "scope": scope})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/access/scope", methods=["PUT"])
+def api_put_scope():
+    data = request.get_json(force=True)
+    allowed_keys = {"id", "scope_name", "allowed_paths", "allowed_remotes",
+                    "blocked_patterns", "enabled"}
+    scope = {k: v for k, v in data.items() if k in allowed_keys}
+
+    # Validate paths
+    validated_paths = []
+    for p in scope.get("allowed_paths") or []:
+        try:
+            validated_paths.append(str(_safe_path(p, must_exist=False)))
+        except ValueError as e:
+            return jsonify({"ok": False, "error": f"Invalid path: {e}"}), 400
+    if validated_paths:
+        scope["allowed_paths"] = validated_paths
+
+    try:
+        scope_id = db.save_scope(scope)
+        return jsonify({"ok": True, "scope_id": scope_id})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/access/check")
+def api_access_check():
+    filepath = request.args.get("path", "")
+    if not filepath:
+        return jsonify({"ok": False, "error": "path parameter required"}), 400
+    try:
+        scope = db.get_active_scope()
+        allowed = db.path_allowed(filepath, scope)
+        return jsonify({"ok": True, "path": filepath, "allowed": allowed,
+                        "scope": scope})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ── API: Local LLM ────────────────────────────────────────────────────────
+
+@bp.route("/api/llm/status")
+def api_llm_status():
+    try:
+        from .llm.task_router import get_router
+        status = get_router().get_status()
+        return jsonify({"ok": True, **status})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/llm/models")
+def api_llm_models():
+    try:
+        from .llm.ollama_client import get_client
+        models = get_client().list_models()
+        return jsonify({"ok": True, "models": models})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/llm/pull", methods=["POST"])
+def api_llm_pull():
+    data = request.get_json(force=True)
+    model = data.get("model")
+    if not model:
+        return jsonify({"ok": False, "error": "model is required"}), 400
+
+    def _do_pull(job_id=None, **kw):
+        from .llm.ollama_client import get_client
+        ok = get_client().pull_model(model)
+        try:
+            db.update_job(job_id, status="completed" if ok else "failed",
+                          message=f"Pull {'succeeded' if ok else 'failed'} for {model}")
+        except Exception:
+            pass
+
+    job_id = _run_bg(f"llm_pull_{model}", _do_pull)
+    try:
+        db.create_job(job_id, "llm_pull")
+    except Exception:
+        pass
+    return jsonify({"ok": True, "job_id": job_id, "model": model})
+
+
+# ── API: Face Recognition ─────────────────────────────────────────────────
+
+@bp.route("/api/faces/scan", methods=["POST"])
+def api_faces_scan():
+    data = request.get_json(force=True)
+    raw_path = data.get("path", "")
+    try:
+        safe = _safe_path(raw_path)
+        if not safe.is_dir():
+            return jsonify({"ok": False, "error": "Path is not a directory"}), 400
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+    def _do_face_scan(job_id=None, **kw):
+        from .engines.face_engine import scan_faces_in_directory
+        result = scan_faces_in_directory(str(safe), db_module=db, job_id=job_id)
+        try:
+            db.update_job(job_id, status="completed", result=result)
+        except Exception:
+            pass
+
+    job_id = _run_bg("face_scan", _do_face_scan)
+    try:
+        db.create_job(job_id, "face_scan")
+    except Exception:
+        pass
+    return jsonify({"ok": True, "job_id": job_id})
+
+
+@bp.route("/api/faces/clusters")
+def api_faces_clusters():
+    try:
+        clusters = db.get_face_clusters()
+        return jsonify({"ok": True, "clusters": clusters, "count": len(clusters)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/faces/clusters/<int:cluster_id>", methods=["PUT"])
+def api_faces_rename_cluster(cluster_id):
+    data = request.get_json(force=True)
+    name = (data.get("suggested_name") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "suggested_name is required"}), 400
+    try:
+        db.update_face_cluster(cluster_id, suggested_name=name)
+        return jsonify({"ok": True, "cluster_id": cluster_id, "suggested_name": name})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500

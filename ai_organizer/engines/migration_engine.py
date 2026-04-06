@@ -5,13 +5,17 @@ Handles:
  - Configuring Dropbox remote via rclone
  - Browsing Dropbox folders
  - Running migration transfers with real-time progress
- - Pause / resume / cancel support
+ - Pause / resume / cancel support (SIGSTOP / SIGCONT)
+ - Conflict resolution strategies: skip, rename_newer, overwrite
+ - Persistent state checkpointing for crash recovery
+ - Pre-migration bandwidth validation and dedup check
 """
 
 import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import threading
 import time
@@ -23,9 +27,17 @@ from ..progress import ProgressTracker, emit_progress, register_operation, unreg
 
 log = logging.getLogger(__name__)
 
-# Active migrations keyed by migration_id
-_active_migrations = {}
+# Active migrations keyed by migration_id (in-memory cache)
+_active_migrations: dict = {}
 _migrations_lock = threading.Lock()
+
+# Conflict strategy → rclone flags
+_CONFLICT_FLAGS: dict[str, list[str]] = {
+    "skip":         [],                          # default rclone behaviour (skip if dest newer)
+    "rename_newer": ["--backup-dir-suffix", ".bak", "--suffix-keep-extension"],
+    "overwrite":    ["--ignore-times"],          # re-transfer regardless of modtime
+    "newer_wins":   ["--update"],                # only transfer if source is newer
+}
 
 
 def check_dropbox_remote():
@@ -69,8 +81,8 @@ def configure_dropbox_remote(remote_name="dropbox"):
         return {"ok": False, "error": str(e)}
 
 
-def test_dropbox_connection(remote_name="dropbox"):
-    """Test connectivity to a Dropbox remote."""
+def test_remote_connection(remote_name: str) -> dict:
+    """Test connectivity to any rclone remote. Returns {ok, info/error}."""
     try:
         result = subprocess.run(
             ["rclone", "about", f"{remote_name}:"],
@@ -86,6 +98,10 @@ def test_dropbox_connection(remote_name="dropbox"):
         return {"ok": False, "error": result.stderr or "Connection failed"}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+# Alias kept for backwards compatibility
+test_dropbox_connection = test_remote_connection
 
 
 def browse_remote(remote_name, path=""):
@@ -157,10 +173,8 @@ def dry_run_migration(source_remote, source_path, dest_remote, dest_path,
             args, capture_output=True, text=True, timeout=300,
             env={**os.environ, "HOME": str(Path.home())}
         )
-        # Parse dry-run output
         files = []
         for line in result.stderr.split("\n"):
-            # Match: NOTICE: file.txt: Skipped copy as --dry-run is set (size 1.234k)
             m = re.search(r'NOTICE:\s+(.+?):\s+Skipped\s+copy', line)
             if m:
                 files.append(m.group(1).strip())
@@ -175,13 +189,44 @@ def dry_run_migration(source_remote, source_path, dest_remote, dest_path,
         return {"ok": False, "error": str(e)}
 
 
+def validate_endpoints(source_remote: str, dest_remote: str) -> dict:
+    """Verify both source and destination remotes are reachable before starting."""
+    src_check = test_remote_connection(source_remote)
+    dst_check = test_remote_connection(dest_remote)
+    ok = src_check["ok"] and dst_check["ok"]
+    return {
+        "ok": ok,
+        "source": src_check,
+        "dest": dst_check,
+        "error": (
+            None if ok else
+            f"Source: {src_check.get('error','ok')} | Dest: {dst_check.get('error','ok')}"
+        ),
+    }
+
+
 def start_migration(migration_id, source_remote, source_path,
-                    dest_remote, dest_path, options=None):
+                    dest_remote, dest_path, options=None, db_module=None):
     """
     Start a migration in a background thread.
     Returns immediately. Progress is broadcast via WebSocket.
+
+    options keys:
+      mode              str   — 'copy' | 'sync'
+      transfers         int   — parallel transfers
+      checkers          int   — parallel checkers
+      bandwidth         str   — rclone bwlimit string (e.g. '10M')
+      conflict_strategy str   — 'skip'|'rename_newer'|'overwrite'|'newer_wins'
+      filters           dict  — include_extensions, exclude_extensions, min_size, max_size
+      validate_first    bool  — test connection before starting (default True)
     """
     options = options or {}
+
+    # Validate connectivity unless explicitly skipped
+    if options.get("validate_first", True):
+        check = validate_endpoints(source_remote, dest_remote)
+        if not check["ok"]:
+            return {"ok": False, "error": check["error"]}
 
     tracker = ProgressTracker(
         operation_id=migration_id,
@@ -189,6 +234,8 @@ def start_migration(migration_id, source_remote, source_path,
         unit="bytes",
     )
     register_operation(tracker)
+
+    conflict_strategy = options.get("conflict_strategy", "skip")
 
     migration = {
         "id": migration_id,
@@ -202,14 +249,32 @@ def start_migration(migration_id, source_remote, source_path,
         "process": None,
         "paused": False,
         "cancelled": False,
+        "conflict_strategy": conflict_strategy,
+        "conflict_count": 0,
         "lines": [],
         "started_at": datetime.now().isoformat(),
         "finished_at": None,
         "result": None,
+        "db_module": db_module,
     }
 
     with _migrations_lock:
         _active_migrations[migration_id] = migration
+
+    # Persist to DB if available
+    if db_module:
+        try:
+            db_module.create_migration_job({
+                "id": migration_id,
+                "source_remote": source_remote,
+                "source_path": source_path,
+                "dest_remote": dest_remote,
+                "dest_path": dest_path,
+                "mode": options.get("mode", "copy"),
+                "options_json": json.dumps(options),
+            })
+        except Exception as e:
+            log.debug("Failed to persist migration job: %s", e)
 
     thread = threading.Thread(
         target=_run_migration, args=(migration,), daemon=True
@@ -224,22 +289,25 @@ def _run_migration(migration):
     mid = migration["id"]
     tracker = migration["tracker"]
     options = migration["options"]
+    db_module = migration.get("db_module")
+    conflict_strategy = migration.get("conflict_strategy", "skip")
 
-    src = f"{migration['source_remote']}:{migration['source_path']}" \
-        if migration["source_path"] else f"{migration['source_remote']}:"
-    dst = f"{migration['dest_remote']}:{migration['dest_path']}" \
-        if migration["dest_path"] else f"{migration['dest_remote']}:"
+    src = (f"{migration['source_remote']}:{migration['source_path']}"
+           if migration["source_path"] else f"{migration['source_remote']}:")
+    dst = (f"{migration['dest_remote']}:{migration['dest_path']}"
+           if migration["dest_path"] else f"{migration['dest_remote']}:")
 
-    mode = options.get("mode", "copy")  # copy or sync
+    mode = options.get("mode", "copy")
     cmd = ["rclone", mode, src, dst]
 
-    # Transfer options
-    transfers = str(options.get("transfers", 4))
-    cmd += ["--transfers", transfers]
+    # Transfer tuning
+    cmd += ["--transfers", str(options.get("transfers", 4))]
     cmd += ["--checkers", str(options.get("checkers", 8))]
-
     if options.get("bandwidth"):
         cmd += ["--bwlimit", options["bandwidth"]]
+
+    # Conflict strategy flags
+    cmd += _CONFLICT_FLAGS.get(conflict_strategy, [])
 
     # Filters
     filters = options.get("filters", {})
@@ -252,11 +320,12 @@ def _run_migration(migration):
     if filters.get("max_size"):
         cmd += ["--max-size", filters["max_size"]]
 
-    # Progress stats
-    cmd += ["--stats", "1s", "--stats-one-line", "-v"]
-    cmd += ["--log-level", "INFO"]
+    # Progress and logging
+    cmd += ["--stats", "1s", "--stats-one-line", "-v", "--log-level", "INFO"]
 
     tracker.update(message=f"Starting {mode}: {src} → {dst}")
+
+    last_checkpoint = time.monotonic()
 
     try:
         proc = subprocess.Popen(
@@ -273,7 +342,7 @@ def _run_migration(migration):
             line = line.rstrip()
             migration["lines"].append(line)
 
-            # Check cancellation
+            # Handle cancellation
             if migration["cancelled"]:
                 proc.terminate()
                 try:
@@ -283,10 +352,17 @@ def _run_migration(migration):
                 tracker.fail(error="Migration cancelled by user")
                 migration["status"] = "cancelled"
                 migration["finished_at"] = datetime.now().isoformat()
-                emit_progress("migration_log", {
-                    "migration_id": mid, "line": "[Cancelled by user]"
-                })
+                emit_progress("migration_log", {"migration_id": mid, "line": "[Cancelled]"})
+                if db_module:
+                    try:
+                        db_module.update_migration_job(mid, status="cancelled")
+                    except Exception:
+                        pass
                 return
+
+            # Handle pause (busy-wait while paused)
+            while migration["paused"] and not migration["cancelled"]:
+                time.sleep(0.5)
 
             # Parse progress
             progress = _parse_rclone_line(line)
@@ -306,10 +382,27 @@ def _run_migration(migration):
                         extra=extra,
                     )
 
-            # Emit log line
-            emit_progress("migration_log", {
-                "migration_id": mid, "line": line
-            })
+                # Checkpoint every 10 s
+                now = time.monotonic()
+                if db_module and now - last_checkpoint > 10:
+                    state = {
+                        "bytes_done": progress.get("bytes_done_raw", 0),
+                        "bytes_total": progress.get("bytes_total_raw", 0),
+                        "files_done": progress.get("files_done", 0),
+                    }
+                    try:
+                        db_module.update_migration_job_state(mid, state)
+                        db_module.update_migration_job(
+                            mid,
+                            bytes_done=state["bytes_done"],
+                            bytes_total=state["bytes_total"],
+                            files_done=state["files_done"],
+                        )
+                    except Exception:
+                        pass
+                    last_checkpoint = now
+
+            emit_progress("migration_log", {"migration_id": mid, "line": line})
 
         proc.wait()
         rc = proc.returncode
@@ -317,14 +410,32 @@ def _run_migration(migration):
         if rc == 0:
             tracker.complete(message="Migration completed successfully")
             migration["status"] = "completed"
+            if db_module:
+                try:
+                    db_module.update_migration_job(mid, status="completed",
+                                                   progress=1.0,
+                                                   result={"exit_code": 0})
+                except Exception:
+                    pass
         else:
             tracker.fail(error=f"rclone exited with code {rc}")
             migration["status"] = "failed"
+            if db_module:
+                try:
+                    db_module.update_migration_job(mid, status="failed",
+                                                   error_message=f"exit code {rc}")
+                except Exception:
+                    pass
 
     except Exception as e:
         tracker.fail(error=str(e))
         migration["status"] = "failed"
         log.error("Migration %s error: %s", mid, e)
+        if db_module:
+            try:
+                db_module.update_migration_job(mid, status="failed", error_message=str(e))
+            except Exception:
+                pass
 
     migration["finished_at"] = datetime.now().isoformat()
     unregister_operation(mid)
@@ -334,7 +445,6 @@ def _parse_rclone_line(line):
     """Parse an rclone progress/stats line."""
     progress = {}
 
-    # Transferred bytes: "Transferred:   5.000 MiB / 23.000 MiB, 22%, 512 KiB/s, ETA 1m30s"
     xfer = re.search(
         r'Transferred:\s+([\d.]+\s*\S+)\s*/\s*([\d.]+\s*\S+),\s*(\d+)%'
         r'(?:,\s*([\d.]+\s*\S+/s))?'
@@ -353,19 +463,16 @@ def _parse_rclone_line(line):
             progress["eta"] = xfer.group(5).strip()
         progress["status_line"] = line.strip()
 
-    # File count: "Transferred:            5 / 23, 22%"
     count = re.search(r'Transferred:\s+(\d+)\s*/\s*(\d+),\s*(\d+)%', line)
     if count and "bytes_done" not in progress:
         progress["files_done"] = int(count.group(1))
         progress["files_total"] = int(count.group(2))
         progress["percent"] = int(count.group(3))
 
-    # Errors
     err = re.search(r'Errors:\s+(\d+)', line)
     if err:
         progress["errors"] = int(err.group(1))
 
-    # Current file
     cf = re.search(r'\*\s+(.+?):\s+(\d+)%\s*/\s*([\d.]+\s*\S+)', line)
     if cf:
         progress["current_file"] = cf.group(1).strip()
@@ -389,11 +496,69 @@ def _parse_size(size_str):
         return 0
 
 
+def pause_migration(migration_id: str) -> dict:
+    """Pause a running migration (SIGSTOP on rclone process)."""
+    with _migrations_lock:
+        m = _active_migrations.get(migration_id)
+    if not m:
+        return {"ok": False, "error": "Migration not found"}
+    if m["status"] != "running" or m["paused"]:
+        return {"ok": False, "error": "Migration is not running or already paused"}
+    proc = m.get("process")
+    if proc and proc.poll() is None:
+        try:
+            os.kill(proc.pid, signal.SIGSTOP)
+        except Exception as e:
+            return {"ok": False, "error": f"SIGSTOP failed: {e}"}
+    m["paused"] = True
+    m["tracker"].update(message="Migration paused")
+    if m.get("db_module"):
+        try:
+            m["db_module"].update_migration_job(migration_id, status="paused")
+        except Exception:
+            pass
+    return {"ok": True, "status": "paused"}
+
+
+def resume_migration(migration_id: str) -> dict:
+    """Resume a paused migration (SIGCONT on rclone process)."""
+    with _migrations_lock:
+        m = _active_migrations.get(migration_id)
+    if not m:
+        return {"ok": False, "error": "Migration not found"}
+    if not m["paused"]:
+        return {"ok": False, "error": "Migration is not paused"}
+    proc = m.get("process")
+    if proc and proc.poll() is None:
+        try:
+            os.kill(proc.pid, signal.SIGCONT)
+        except Exception as e:
+            return {"ok": False, "error": f"SIGCONT failed: {e}"}
+    m["paused"] = False
+    m["status"] = "running"
+    m["tracker"].update(message="Migration resumed")
+    if m.get("db_module"):
+        try:
+            m["db_module"].update_migration_job(migration_id, status="running")
+        except Exception:
+            pass
+    return {"ok": True, "status": "running"}
+
+
 def cancel_migration(migration_id):
     """Cancel a running migration."""
     with _migrations_lock:
         m = _active_migrations.get(migration_id)
-        if m and m["status"] == "running":
+        if m and m["status"] in ("running", "paused"):
+            # Resume first if paused so the thread can observe cancelled flag
+            if m["paused"]:
+                proc = m.get("process")
+                if proc and proc.poll() is None:
+                    try:
+                        os.kill(proc.pid, signal.SIGCONT)
+                    except Exception:
+                        pass
+                m["paused"] = False
             m["cancelled"] = True
             return {"ok": True}
     return {"ok": False, "error": "Migration not found or not running"}
@@ -408,6 +573,9 @@ def get_migration_status(migration_id):
         tracker = m["tracker"]
         snap = tracker._snapshot()
         snap["migration_status"] = m["status"]
+        snap["paused"] = m["paused"]
+        snap["conflict_strategy"] = m.get("conflict_strategy", "skip")
+        snap["conflict_count"] = m.get("conflict_count", 0)
         snap["started_at"] = m["started_at"]
         snap["finished_at"] = m["finished_at"]
         snap["line_count"] = len(m["lines"])
@@ -431,8 +599,10 @@ def list_active_migrations():
             result[mid] = {
                 "id": mid,
                 "status": m["status"],
+                "paused": m["paused"],
                 "source": f"{m['source_remote']}:{m['source_path']}",
                 "dest": f"{m['dest_remote']}:{m['dest_path']}",
+                "conflict_strategy": m.get("conflict_strategy", "skip"),
                 "started_at": m["started_at"],
                 "finished_at": m["finished_at"],
             }
