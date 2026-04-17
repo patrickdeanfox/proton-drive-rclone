@@ -1012,27 +1012,33 @@ def _count_local_contents(path):
     return {"folders": folders, "files": files, "total_size": total_size}
 
 
-def _count_remote_contents(remote_path):
-    """Count folders and files on remote using rclone lsjson --recursive."""
-    folders = 0
-    files = 0
-    total_size = 0
+def _lsjson_remote(remote_path, timeout=900):
+    """Single rclone lsjson call — returns (success, items, error). Uses --fast-list."""
     success, stdout, stderr = run_rclone_cmd(
-        ["lsjson", remote_path, "--recursive", "--no-modtime", "--no-mimetype"],
-        timeout=120,
+        ["lsjson", remote_path, "--recursive", "--fast-list",
+         "--no-modtime", "--no-mimetype"],
+        timeout=timeout,
     )
-    if success and stdout.strip():
-        try:
-            items = json.loads(stdout)
-            for item in items:
-                if item.get("IsDir", False):
-                    folders += 1
-                else:
-                    files += 1
-                    total_size += item.get("Size", 0)
-        except json.JSONDecodeError:
-            pass
-    return {"folders": folders, "files": files, "total_size": total_size, "rclone_ok": success, "error": stderr if not success else ""}
+    if not success:
+        return False, [], stderr
+    try:
+        return True, json.loads(stdout) if stdout.strip() else [], ""
+    except json.JSONDecodeError as e:
+        return False, [], f"Invalid JSON from rclone: {e}"
+
+
+def _count_remote_contents(remote_path):
+    """Count folders/files on remote (used by endpoints that only need counts)."""
+    ok, items, err = _lsjson_remote(remote_path)
+    folders = files = total_size = 0
+    for item in items:
+        if item.get("IsDir", False):
+            folders += 1
+        else:
+            files += 1
+            total_size += item.get("Size", 0)
+    return {"folders": folders, "files": files, "total_size": total_size,
+            "rclone_ok": ok, "error": err}
 
 
 def _list_local_files(path):
@@ -1050,18 +1056,12 @@ def _list_local_files(path):
 
 def _list_remote_files(remote_path):
     """Get set of relative file paths on remote."""
+    ok, items, _ = _lsjson_remote(remote_path)
     result = set()
-    success, stdout, _ = run_rclone_cmd(
-        ["lsjson", remote_path, "--recursive", "--no-modtime", "--no-mimetype", "--files-only"],
-        timeout=120,
-    )
-    if success and stdout.strip():
-        try:
-            items = json.loads(stdout)
-            for item in items:
+    if ok:
+        for item in items:
+            if not item.get("IsDir", False):
                 result.add(item.get("Path", item.get("Name", "")))
-        except json.JSONDecodeError:
-            pass
     return result
 
 
@@ -1084,18 +1084,28 @@ def api_compare_folders(config_id):
 
     # Count contents
     local_stats = _count_local_contents(local_path)
-    remote_stats = _count_remote_contents(remote_full)
 
-    if not remote_stats.get("rclone_ok", True):
+    # Single remote listing — reused for both counts and file set (timeout 15min for large remotes)
+    ok, remote_items, remote_err = _lsjson_remote(remote_full, timeout=900)
+    if not ok:
         return jsonify({
-            "error": f"Could not list remote: {remote_stats.get('error', 'Unknown error')}",
+            "error": f"Could not list remote: {remote_err or 'Unknown error'}",
             "local": local_stats,
         }), 500
 
+    folders = files = total_size = 0
+    remote_files = set()
+    for item in remote_items:
+        if item.get("IsDir", False):
+            folders += 1
+        else:
+            files += 1
+            total_size += item.get("Size", 0)
+            remote_files.add(item.get("Path", item.get("Name", "")))
+    remote_stats = {"folders": folders, "files": files, "total_size": total_size}
+
     # Find differences
     local_files = _list_local_files(local_path)
-    remote_files = _list_remote_files(remote_full)
-
     missing_on_remote = sorted(local_files - remote_files)
     missing_on_local = sorted(remote_files - local_files)
 
@@ -1104,7 +1114,7 @@ def api_compare_folders(config_id):
         "local_path": local_path,
         "remote_path": remote_path or "/",
         "local": local_stats,
-        "remote": {k: v for k, v in remote_stats.items() if k not in ("rclone_ok", "error")},
+        "remote": remote_stats,
         "missing_on_remote": missing_on_remote[:500],  # Cap for large dirs
         "missing_on_remote_count": len(missing_on_remote),
         "missing_on_local": missing_on_local[:500],
