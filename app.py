@@ -393,6 +393,14 @@ def _build_rclone_bisync_args(local_path, remote_full, env_config, resync=False)
     if resync:
         args.append("--resync")
 
+    # --resilient: continue syncing other files when one file fails (e.g. 422 already-exists)
+    # instead of aborting the entire run. Failed files are retried on the next sync.
+    args.append("--resilient")
+
+    # Proton Drive rate-limit headroom: add a small minimum sleep between API calls
+    # to reduce 429 bursts on large overnight syncs.
+    args += ["--drive-pacer-min-sleep", "10ms", "--drive-pacer-burst", "200"]
+
     # Emit transfer stats every second so the UI can show progress
     args += ["--stats", "1s", "--stats-one-line"]
 
@@ -475,16 +483,23 @@ def _run_rclone_streaming(config_id, rclone_args):
     def _run(args):
         rc = 0
         output_lines = []
-        # Track repeated errors to detect infinite retry loops
+        # Track repeated errors to detect infinite retry loops.
+        # 422 Code=2500 "already exists" is BENIGN — the file is already on Proton,
+        # rclone should skip it. Only true unrecoverable 422s (trash ops, etc.) count.
         consecutive_errors = 0
+        already_exists_count = 0  # track but don't kill on these
         MAX_CONSECUTIVE_ERRORS = 15  # Kill after this many consecutive error lines
         # Track when we hit 100% to detect stale processes
         reached_100_pct_at = None
         MAX_STALE_100_SECS = 120  # Kill if stuck at 100% for this long
-        # Error patterns that indicate an unrecoverable loop
+        # Patterns that indicate an unrecoverable loop (kill the process)
         ERROR_LOOP_PATTERNS = (
-            "RESTY 422",   # Proton Drive "not found" trash errors
-            "RESTY 429",   # Rate limiting loops
+            "RESTY 429",   # Rate limiting — tight retry loops
+        )
+        # Patterns that look like errors but are actually benign skips
+        BENIGN_422_PATTERNS = (
+            "already exists",          # Code=2500: file is already on Proton — skip
+            "Code=2500",               # Explicit already-exists code
         )
         try:
             proc = subprocess.Popen(
@@ -501,7 +516,14 @@ def _run_rclone_streaming(config_id, rclone_args):
                 output_lines.append(line)
 
                 # --- Error loop detection ---
-                if any(pat in line for pat in ERROR_LOOP_PATTERNS):
+                # "already exists" 422s are benign — count separately, don't kill
+                if "RESTY 422" in line and any(p in line for p in BENIGN_422_PATTERNS):
+                    already_exists_count += 1
+                    # Log a summary every 10 occurrences rather than spamming
+                    if already_exists_count % 10 == 0:
+                        _append(f"[info] {already_exists_count} 'already exists' skips so far — file already on Proton Drive, continuing")
+                    consecutive_errors = 0  # explicitly reset — this is not a kill-worthy error
+                elif any(pat in line for pat in ERROR_LOOP_PATTERNS):
                     consecutive_errors += 1
                 else:
                     consecutive_errors = 0
