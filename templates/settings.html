@@ -1,156 +1,184 @@
 {% extends 'base.html' %}
-{% set active = 'settings' %}
-{% block title %}Settings — Proton Drive Manager{% endblock %}
+{% set page = 'settings' %}
+{% block title %}Settings — Proton Drive Sync{% endblock %}
 
 {% block content %}
 <div class="page-header">
-    <h2>Settings</h2>
-    <p>Edit your protondrive-linux configuration.</p>
+  <h1>Settings</h1>
 </div>
 
-<!-- Sync Settings -->
 <div class="card">
-    <div class="card-header">
-        <h3>🔄 Sync</h3>
-    </div>
-    <div class="settings-grid" id="sync-settings">
-        <div class="loading-overlay"><span class="spinner"></span></div>
-    </div>
+  <h2 class="section-title">Active Remote</h2>
+  <p class="muted">Choose which rclone remote to sync with.</p>
+  <div id="remoteList" class="remote-list">Loading…</div>
 </div>
 
-<!-- Mount Settings -->
 <div class="card">
-    <div class="card-header">
-        <h3>💿 Mount</h3>
-    </div>
-    <div class="settings-grid" id="mount-settings">
-        <div class="loading-overlay"><span class="spinner"></span></div>
-    </div>
+  <h2 class="section-title">Connection</h2>
+  <div id="connInfo" class="conn-info muted">Checking…</div>
+  <div id="quotaBar" style="display:none; margin-top:12px;">
+    <div class="progress-track"><div class="progress-fill" id="quotaFill" style="width:0%"></div></div>
+    <div class="progress-meta" id="quotaMeta"></div>
+  </div>
 </div>
 
-<!-- Paths -->
 <div class="card">
-    <div class="card-header">
-        <h3>📁 Paths</h3>
+  <h2 class="section-title">Sync Options</h2>
+  <form id="syncForm" onsubmit="saveSettings(event)">
+    <div class="field">
+      <label>Conflict Policy</label>
+      <select id="cConflict" class="input">
+        <option value="newer">Keep newer (default)</option>
+        <option value="larger">Keep larger</option>
+        <option value="skip">Skip conflicts</option>
+      </select>
     </div>
-    <div class="settings-grid" id="path-settings">
-        <div class="loading-overlay"><span class="spinner"></span></div>
+    <div class="field">
+      <label>Max Delete %</label>
+      <div class="input-row">
+        <input type="number" id="cMaxDel" min="1" max="100" class="input" style="max-width:100px">
+        <span class="muted">% — safety limit to prevent mass deletion</span>
+      </div>
     </div>
+    <div class="field">
+      <label>Transfers (parallel files)</label>
+      <input type="number" id="cTransfers" min="1" max="32" class="input" style="max-width:100px">
+    </div>
+    <div class="field">
+      <label>Checkers (parallel checks)</label>
+      <input type="number" id="cCheckers" min="1" max="64" class="input" style="max-width:100px">
+    </div>
+    <div class="field">
+      <label>Bandwidth Limit</label>
+      <div class="input-row">
+        <input type="text" id="cBandwidth" class="input" style="max-width:140px" placeholder="0 (unlimited)">
+        <span class="muted">e.g. 10M, 1G — leave blank for unlimited</span>
+      </div>
+    </div>
+    <div class="field">
+      <label>Exclude Patterns <span class="muted">(comma-separated)</span></label>
+      <input type="text" id="cExclude" class="input" placeholder=".DS_Store,*.tmp,~*">
+    </div>
+    <div class="field">
+      <label>Log Level</label>
+      <select id="cLogLevel" class="input">
+        <option value="DEBUG">DEBUG</option>
+        <option value="INFO">INFO</option>
+        <option value="NOTICE">NOTICE</option>
+        <option value="ERROR">ERROR</option>
+      </select>
+    </div>
+    <div style="margin-top:8px; display:flex; gap:10px; align-items:center;">
+      <button type="submit" class="btn btn-primary">Save Settings</button>
+      <span id="saveMsg" class="muted" style="display:none">Saved ✓</span>
+    </div>
+  </form>
 </div>
 
-<!-- Logging -->
 <div class="card">
-    <div class="card-header">
-        <h3>📋 Logging</h3>
-    </div>
-    <div class="settings-grid" id="log-settings">
-        <div class="loading-overlay"><span class="spinner"></span></div>
-    </div>
+  <h2 class="section-title">rclone Config</h2>
+  <p class="muted">Run this in your terminal to add or reconfigure the Proton Drive remote:</p>
+  <pre class="code-block">rclone config</pre>
+  <p class="muted" style="margin-top:8px;">Select <strong>New remote → Proton Drive</strong> and follow the prompts. When done, enter the remote name above.</p>
 </div>
-
-<!-- Save -->
-<div style="display:flex;gap:12px;justify-content:flex-end;margin-bottom:32px">
-    <button class="btn btn-ghost" onclick="loadSettings()">↩ Discard Changes</button>
-    <button class="btn btn-primary" onclick="saveSettings()">💾 Save All Settings</button>
-</div>
-
 {% endblock %}
 
 {% block scripts %}
 <script>
-// Settings schema: key → { label, type, hint, options }
-const SETTINGS_SCHEMA = {
-    sync: [
-        { key: 'SYNC_DIR',              label: 'Sync Directory',         type: 'text',   hint: 'Local folder to bisync with Proton Drive' },
-        { key: 'SYNC_CONFLICT_POLICY',  label: 'Conflict Policy',        type: 'select', options: ['newer','larger','skip'], hint: 'How to resolve conflicts between local and remote' },
-        { key: 'SYNC_EXCLUDE_PATTERNS', label: 'Exclude Patterns',       type: 'text',   hint: 'Comma-separated globs to skip (e.g. *.tmp, .DS_Store)' },
-        { key: 'SYNC_MAX_DELETE_PCT',   label: 'Max Delete %',           type: 'number', hint: 'Abort bisync if more than this % of files would be deleted (1–100)' },
-        { key: 'SYNC_CHECKERS',         label: 'Checkers',               type: 'number', hint: 'Parallel file-checking goroutines' },
-        { key: 'SYNC_TRANSFERS',        label: 'Transfers',              type: 'number', hint: 'Parallel file-transfer goroutines' },
-        { key: 'SYNC_INTERVAL_MIN',     label: 'Sync Interval (min)',    type: 'number', hint: 'How often the systemd timer triggers a sync' },
-    ],
-    mount: [
-        { key: 'MOUNT_DIR',            label: 'Mount Directory',         type: 'text',   hint: 'Where to mount Proton Drive as a local folder' },
-        { key: 'VFS_CACHE_MODE',       label: 'VFS Cache Mode',          type: 'select', options: ['off','minimal','writes','full'], hint: '"full" gives best compatibility; "off" uses no local disk cache' },
-        { key: 'VFS_CACHE_MAX_AGE',    label: 'VFS Cache Max Age',       type: 'text',   hint: 'How long to keep cached files (e.g. 1h, 30m)' },
-        { key: 'VFS_CACHE_MAX_SIZE',   label: 'VFS Cache Max Size',      type: 'text',   hint: 'Max disk space for VFS cache (e.g. 10G, 2G)' },
-        { key: 'DIR_CACHE_TIME',       label: 'Dir Cache Time',          type: 'text',   hint: 'How long to cache directory listings (e.g. 5m)' },
-        { key: 'POLL_INTERVAL',        label: 'Poll Interval',           type: 'text',   hint: 'How often to poll for remote changes when mounted (e.g. 30s)' },
-        { key: 'VFS_READ_AHEAD',       label: 'Read Ahead',              type: 'text',   hint: 'Read-ahead buffer size (e.g. 128M)' },
-        { key: 'BUFFER_SIZE',          label: 'Buffer Size',             type: 'text',   hint: 'In-memory buffer for file transfers (e.g. 64M)' },
-    ],
-    path: [
-        { key: 'LOG_DIR',              label: 'Log Directory',           type: 'text',   hint: 'Where log files are stored' },
-    ],
-    log: [
-        { key: 'LOG_LEVEL',            label: 'Log Level',               type: 'select', options: ['DEBUG','INFO','NOTICE','WARNING','ERROR'], hint: 'rclone log verbosity' },
-        { key: 'LOG_MAX_SIZE_MB',      label: 'Max Log Size (MB)',        type: 'number', hint: 'Rotate logs when they exceed this size' },
-        { key: 'LOG_RETAIN_DAYS',      label: 'Log Retain Days',         type: 'number', hint: 'Delete rotated logs older than this many days' },
-    ],
-};
-
-let currentConfig = {};
-let pendingChanges = {};
-
-function renderSettingsGroup(containerId, fields, config) {
-    const el = document.getElementById(containerId);
-    el.innerHTML = fields.map(f => {
-        const val = config[f.key] ?? '';
-        let input;
-        if (f.type === 'select') {
-            const opts = f.options.map(o =>
-                `<option value="${o}" ${val === o ? 'selected' : ''}>${o}</option>`
-            ).join('');
-            input = `<select class="setting-input" data-key="${f.key}" onchange="markChanged(this)">${opts}</select>`;
-        } else if (f.type === 'number') {
-            input = `<input type="number" class="setting-input" data-key="${f.key}" value="${val}" oninput="markChanged(this)">`;
-        } else {
-            input = `<input type="text" class="setting-input" data-key="${f.key}" value="${val}" oninput="markChanged(this)">`;
-        }
-        return `
-        <div class="setting-row">
-            <div class="setting-meta">
-                <label class="setting-label">${f.label}</label>
-                <span class="setting-hint">${f.hint}</span>
-            </div>
-            <div class="setting-control">
-                ${input}
-                <span class="setting-key mono">${f.key}</span>
-            </div>
-        </div>`;
-    }).join('');
+async function loadPage() {
+  await loadRemotes();
+  await loadConnection();
+  await loadConfig();
 }
 
-function markChanged(el) {
-    pendingChanges[el.dataset.key] = el.value;
-    el.classList.add('changed');
+async function loadRemotes() {
+  const r = await fetch('/api/remotes');
+  const d = await r.json();
+  const container = document.getElementById('remoteList');
+  container.innerHTML = '';
+  if (!d.remotes?.length) {
+    container.innerHTML = '<p class="muted">No rclone remotes found. Run <code>rclone config</code> to add one.</p>';
+    return;
+  }
+  d.remotes.forEach(name => {
+    const row = document.createElement('div');
+    row.className = 'remote-row';
+    const active = name === d.active;
+    row.innerHTML = `
+      <span class="remote-name ${active ? 'active-remote' : ''}">${esc(name)}</span>
+      <button class="btn btn-sm ${active ? 'btn-primary' : 'btn-ghost'}"
+              onclick="setRemote('${esc(name)}')" ${active ? 'disabled' : ''}>
+        ${active ? 'Active' : 'Use This'}
+      </button>
+      <button class="btn btn-sm btn-ghost" onclick="testRemote('${esc(name)}')">Test</button>`;
+    container.appendChild(row);
+  });
 }
 
-async function loadSettings() {
-    pendingChanges = {};
-    const config = await api('/config');
-    currentConfig = config;
-    renderSettingsGroup('sync-settings',  SETTINGS_SCHEMA.sync,  config);
-    renderSettingsGroup('mount-settings', SETTINGS_SCHEMA.mount, config);
-    renderSettingsGroup('path-settings',  SETTINGS_SCHEMA.path,  config);
-    renderSettingsGroup('log-settings',   SETTINGS_SCHEMA.log,   config);
+async function setRemote(name) {
+  await fetch(`/api/remotes/${encodeURIComponent(name)}/set-active`, {method:'POST'});
+  toast('Active remote updated', 'success');
+  await loadRemotes();
+  await loadConnection();
 }
 
-async function saveSettings() {
-    if (!Object.keys(pendingChanges).length) {
-        showToast('No changes to save', 'info');
-        return;
+async function testRemote(name) {
+  toast(`Testing ${name}…`, 'info');
+  const r = await fetch(`/api/remotes/${encodeURIComponent(name)}/test`, {method:'POST'});
+  const d = await r.json();
+  toast(d.ok ? `✓ ${name} connected` : `✗ ${name}: ${d.error}`, d.ok ? 'success' : 'error');
+}
+
+async function loadConnection() {
+  const el = document.getElementById('connInfo');
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    if (!d.rclone_ok) { el.textContent = 'rclone not installed'; return; }
+    if (!d.connected) { el.textContent = `Not connected to ${d.remote} — ${d.error}`; return; }
+    el.innerHTML = `<span style="color:var(--green)">✓ Connected</span> to <strong>${esc(d.remote)}</strong> · rclone v${esc(d.rclone_version)}`;
+    const a = await fetch(`/api/remotes/${encodeURIComponent(d.remote)}/about`);
+    const q = await a.json();
+    if (q.total) {
+      const pct = Math.round((q.used / q.total) * 100);
+      document.getElementById('quotaFill').style.width = pct + '%';
+      document.getElementById('quotaMeta').textContent = `${fmtBytes(q.used)} used of ${fmtBytes(q.total)} (${pct}%)`;
+      document.getElementById('quotaBar').style.display = '';
     }
-    const res = await api('/config', { method: 'PUT', body: pendingChanges });
-    if (res.success) {
-        showToast('Settings saved', 'success');
-        pendingChanges = {};
-        document.querySelectorAll('.setting-input.changed').forEach(el => el.classList.remove('changed'));
-    } else {
-        showToast(res.error || 'Failed to save', 'error');
-    }
+  } catch (e) { el.textContent = 'Error: ' + e.message; }
 }
 
-document.addEventListener('DOMContentLoaded', loadSettings);
+async function loadConfig() {
+  const r = await fetch('/api/config');
+  const d = await r.json();
+  document.getElementById('cConflict').value   = d.SYNC_CONFLICT_POLICY || 'newer';
+  document.getElementById('cMaxDel').value     = d.SYNC_MAX_DELETE_PCT  || '50';
+  document.getElementById('cTransfers').value  = d.SYNC_TRANSFERS       || '4';
+  document.getElementById('cCheckers').value   = d.SYNC_CHECKERS        || '8';
+  document.getElementById('cBandwidth').value  = d.SYNC_BANDWIDTH_LIMIT || '';
+  document.getElementById('cExclude').value    = d.SYNC_EXCLUDE_PATTERNS|| '';
+  document.getElementById('cLogLevel').value   = d.LOG_LEVEL            || 'INFO';
+}
+
+async function saveSettings(e) {
+  e.preventDefault();
+  const payload = {
+    SYNC_CONFLICT_POLICY:  document.getElementById('cConflict').value,
+    SYNC_MAX_DELETE_PCT:   document.getElementById('cMaxDel').value,
+    SYNC_TRANSFERS:        document.getElementById('cTransfers').value,
+    SYNC_CHECKERS:         document.getElementById('cCheckers').value,
+    SYNC_BANDWIDTH_LIMIT:  document.getElementById('cBandwidth').value,
+    SYNC_EXCLUDE_PATTERNS: document.getElementById('cExclude').value,
+    LOG_LEVEL:             document.getElementById('cLogLevel').value,
+  };
+  await fetch('/api/config', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+  const msg = document.getElementById('saveMsg');
+  msg.style.display = '';
+  setTimeout(() => msg.style.display = 'none', 2000);
+  toast('Settings saved', 'success');
+}
+
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+loadPage();
 </script>
 {% endblock %}

@@ -1,191 +1,443 @@
 {% extends 'base.html' %}
-{% set active = 'dashboard' %}
-{% block title %}Dashboard — Proton Drive Manager{% endblock %}
+{% set page = 'home' %}
+{% block title %}Dashboard — Proton Drive Sync{% endblock %}
 
 {% block content %}
 <div class="page-header">
-    <h2><i class="fas fa-chart-pie" style="color:var(--proton-purple-light);margin-right:8px"></i>Dashboard</h2>
-    <p>Overview of your Proton Drive sync status and quick actions.</p>
+  <h1>Dashboard</h1>
+  <button class="btn btn-primary" onclick="openAddModal()">+ Add Sync</button>
 </div>
 
-<!-- Status Cards -->
-<div id="dashboard-stats" class="stats-grid">
-    <div class="stat-card"><div class="skeleton skeleton-title"></div><div class="skeleton skeleton-text"></div></div>
-    <div class="stat-card"><div class="skeleton skeleton-title"></div><div class="skeleton skeleton-text"></div></div>
-    <div class="stat-card"><div class="skeleton skeleton-title"></div><div class="skeleton skeleton-text"></div></div>
-    <div class="stat-card"><div class="skeleton skeleton-title"></div><div class="skeleton skeleton-text"></div></div>
-    <div class="stat-card"><div class="skeleton skeleton-title"></div><div class="skeleton skeleton-text"></div></div>
-    <div class="stat-card"><div class="skeleton skeleton-title"></div><div class="skeleton skeleton-text"></div></div>
+<!-- Storage bar -->
+<div class="card storage-card" id="storageCard" style="display:none">
+  <div class="storage-info">
+    <span id="storageUsed">—</span>
+    <span class="muted">of</span>
+    <span id="storageTotal">—</span>
+    <span class="muted">used</span>
+  </div>
+  <div class="progress-track">
+    <div class="progress-fill" id="storageFill" style="width:0%"></div>
+  </div>
 </div>
 
-<!-- What's Happening -->
-<div class="card" id="whats-happening" style="display:none">
-    <div class="card-header">
-        <h3><i class="fas fa-bolt" style="color:var(--warning)"></i> What's Happening Now</h3>
-        <span class="badge badge-live"><i class="fas fa-circle" style="font-size:6px"></i> Live</span>
-    </div>
-    <div id="live-operations"></div>
+<!-- Sync pair list -->
+<div id="syncList">
+  <div class="empty-state" id="emptyState">
+    <div class="empty-icon">⬡</div>
+    <p>No sync pairs yet.<br>Add one to get started.</p>
+    <button class="btn btn-primary" onclick="openAddModal()">Add Sync Pair</button>
+  </div>
 </div>
 
-<!-- Quick Actions -->
-<div class="card">
-    <div class="card-header">
-        <h3><i class="fas fa-rocket" style="color:var(--proton-purple-light)"></i> Quick Actions</h3>
+<!-- Active log panel (appears when a sync runs) -->
+<div class="card log-card" id="logPanel" style="display:none">
+  <div class="log-header">
+    <span id="logTitle">Sync Log</span>
+    <div class="log-controls">
+      <label class="toggle-label">
+        <input type="checkbox" id="autoScrollChk" checked> Auto-scroll
+      </label>
+      <button class="btn btn-sm btn-ghost" onclick="closeLog()">✕</button>
     </div>
-    <div class="btn-group" style="flex-wrap:wrap">
-        <button class="btn btn-primary" onclick="doMount()"><i class="fas fa-link"></i> Mount Drive</button>
-        <button class="btn btn-ghost" onclick="doUnmount()"><i class="fas fa-eject"></i> Unmount</button>
-        <button class="btn btn-ghost" onclick="doHealthCheck()"><i class="fas fa-heartbeat"></i> Health Check</button>
-        <button class="btn btn-ghost" onclick="loadDashboard()"><i class="fas fa-sync-alt"></i> Refresh</button>
-        <a href="/sync-schedules" class="btn btn-outline-purple"><i class="fas fa-arrows-rotate"></i> Go to Sync</a>
+  </div>
+  <div class="progress-bar-wrap" id="progressWrap" style="display:none">
+    <div class="progress-track">
+      <div class="progress-fill" id="progressFill" style="width:0%"></div>
     </div>
+    <div class="progress-meta" id="progressMeta"></div>
+  </div>
+  <pre class="log-output" id="logOutput"></pre>
 </div>
 
-<!-- Sync Health Overview (powered by rclone size + history) -->
-<div class="card" id="sync-health-card">
-    <div class="card-header">
-        <h3><i class="fas fa-shield-alt" style="color:var(--proton-purple-light)"></i> Sync Health</h3>
-        <button class="btn btn-ghost btn-xs" onclick="loadSyncHealth()"><i class="fas fa-sync-alt"></i> Refresh</button>
+<!-- Add/Edit modal -->
+<div class="modal-backdrop" id="modalBackdrop" onclick="closeModal(event)">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 id="modalTitle">Add Sync Pair</h2>
+      <button class="btn btn-ghost btn-sm" onclick="closeModal()">✕</button>
     </div>
-    <div id="sync-health-grid" class="stats-grid">
-        <div class="stat-card"><span class="text-muted">Loading sync health...</span></div>
+    <div class="modal-body">
+      <input type="hidden" id="editId">
+
+      <div class="field">
+        <label>Name</label>
+        <input type="text" id="fName" placeholder="e.g. Documents" class="input">
+      </div>
+
+      <div class="field">
+        <label>Local Folder</label>
+        <div class="input-row">
+          <input type="text" id="fLocal" placeholder="/home/user/Documents" class="input">
+          <button class="btn btn-ghost btn-sm" onclick="browseLocal()">Browse</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Remote Folder <span class="muted">(on Proton Drive)</span></label>
+        <div class="input-row">
+          <input type="text" id="fRemote" placeholder="Documents" class="input">
+          <button class="btn btn-ghost btn-sm" onclick="browseRemote()">Browse</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Direction</label>
+        <div class="radio-group">
+          <label class="radio-label">
+            <input type="radio" name="direction" value="push" checked> Push (local → Proton)
+          </label>
+          <label class="radio-label">
+            <input type="radio" name="direction" value="pull"> Pull (Proton → local)
+          </label>
+          <label class="radio-label">
+            <input type="radio" name="direction" value="bisync"> Bisync (two-way)
+          </label>
+        </div>
+      </div>
     </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveSync()">Save</button>
+    </div>
+  </div>
 </div>
 
-<!-- Getting Started Guide -->
-<div class="card" id="getting-started">
-    <div class="card-header">
-        <h3><i class="fas fa-lightbulb" style="color:var(--warning)"></i> Getting Started</h3>
-        <button class="btn btn-ghost btn-xs" onclick="this.closest('.card').style.display='none'"><i class="fas fa-times"></i></button>
+<!-- Browse picker modal -->
+<div class="modal-backdrop" id="browserBackdrop" onclick="closeBrowser(event)">
+  <div class="modal modal-wide">
+    <div class="modal-header">
+      <h2 id="browserTitle">Browse</h2>
+      <button class="btn btn-ghost btn-sm" onclick="closeBrowser()">✕</button>
     </div>
-    <div style="font-size:14px;color:var(--text-secondary);line-height:1.8">
-        <p><strong>1. Install rclone</strong> — Run <code style="color:var(--proton-purple-light);background:var(--proton-purple-subtle);padding:2px 6px;border-radius:3px">curl https://rclone.org/install.sh | sudo bash</code></p>
-        <p><strong>2. Configure Proton Drive</strong> — Run <code style="color:var(--proton-purple-light);background:var(--proton-purple-subtle);padding:2px 6px;border-radius:3px">rclone config</code> and set up a "protondrive" remote</p>
-        <p><strong>3. Set up Sync</strong> — Go to <a href="/sync-schedules">Sync & Schedules</a> to configure folders to sync</p>
-        <p><strong>4. Automate</strong> — Create schedules to keep your files in sync automatically</p>
-        <p style="margin-top:8px"><a href="https://drive.proton.me/" target="_blank" style="color:var(--proton-purple-light)"><i class="fas fa-external-link-alt"></i> Open Proton Drive Web</a></p>
+    <div class="browser-path-bar">
+      <span class="muted">Path:</span>
+      <code id="browserPath">/</code>
     </div>
-</div>
-
-<!-- Sync History -->
-<div class="card">
-    <div class="card-header">
-        <h3><i class="fas fa-history" style="color:var(--text-muted)"></i> Recent Sync History</h3>
-        <a href="/logs" class="btn btn-ghost btn-xs">View All Logs →</a>
+    <div class="modal-body browser-body" id="browserBody">
+      <div class="muted">Loading…</div>
     </div>
-    <div id="dashboard-history">
-        <div class="loading-overlay"><span class="spinner"></span></div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeBrowser()">Cancel</button>
+      <button class="btn btn-primary" onclick="selectBrowserPath()">Select This Folder</button>
     </div>
+  </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-// ─── Sync Health Dashboard ───────────────────────────────────
-async function loadSyncHealth() {
-    const grid = document.getElementById('sync-health-grid');
-    if (!grid) return;
-    try {
-        const data = await api('/sync-dashboard');
-        if (!data.configs || data.configs.length === 0) {
-            grid.innerHTML = '<div class="stat-card"><span class="text-muted">No sync configs yet. <a href="/sync-schedules">Create one</a></span></div>';
-            return;
-        }
-        grid.innerHTML = data.configs.map(c => {
-            const statusColors = {
-                syncing: 'var(--proton-purple-light)',
-                active: 'var(--success)',
-                disabled: 'var(--text-muted)',
-                error: 'var(--danger)',
-            };
-            const statusIcons = {
-                syncing: 'fa-spinner fa-spin',
-                active: 'fa-check-circle',
-                disabled: 'fa-pause-circle',
-                error: 'fa-exclamation-triangle',
-            };
-            const color = statusColors[c.status] || 'var(--text-secondary)';
-            const icon = statusIcons[c.status] || 'fa-question-circle';
-            const lastSync = c.last_sync ? formatDate(c.last_sync) : 'Never';
-            return `<div class="stat-card" style="border-left:3px solid ${color}">
-                <div style="display:flex;justify-content:space-between;align-items:center">
-                    <div class="stat-label">${escHtml(c.name)}</div>
-                    <i class="fas ${icon}" style="color:${color}"></i>
-                </div>
-                <div class="stat-value" style="font-size:14px;color:${color}">${escHtml(c.message)}</div>
-                <div class="stat-sub">
-                    ${c.local_files != null ? c.local_files.toLocaleString() + ' files' : ''}
-                    ${c.local_size ? ' · ' + formatSize(c.local_size) : ''}
-                </div>
-                <div class="stat-sub" style="margin-top:2px">Last sync: ${lastSync}</div>
-                ${c.status === 'active' ? `<button class="btn btn-ghost btn-xs" style="margin-top:8px;font-size:11px" data-cfg-id="${escHtml(c.id)}" onclick="verifySyncFromDashboard(this.dataset.cfgId, this)"><i class="fas fa-fingerprint"></i> Verify Integrity</button>` : ''}
-            </div>`;
-        }).join('');
-    } catch (e) {
-        grid.innerHTML = `<div class="stat-card"><span class="text-muted">Could not load sync health</span></div>`;
-    }
+let configs      = [];
+let _activePolls = {};   // config_id → intervalId
+let _logOffset   = 0;
+let _logConfigId = null;
+let _browserMode = null; // 'local' | 'remote'
+let _browserCurrent = '';
+
+// ── Load everything ───────────────────────────────────────────────────────────
+async function load() {
+  await loadStorage();
+  await loadConfigs();
 }
 
-async function verifySyncFromDashboard(configId, btn) {
-    if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner" style="width:12px;height:12px;border-width:2px;display:inline-block"></span> Checking...'; }
-    try {
-        const data = await api(`/sync-configs/${configId}/verify`, { method: 'POST' });
-        if (data.verified) {
-            showToast(`Integrity verified: ${data.matched} files match`, 'success');
-        } else {
-            showToast(`${data.mismatched_count} mismatched, ${data.missing_on_remote_count} missing on remote`, 'error');
-        }
-    } catch (e) {
-        showToast('Verification failed: ' + e.message, 'error');
+async function loadStorage() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    if (!d.connected) return;
+    const a = await fetch(`/api/remotes/${d.remote}/about`);
+    const q = await a.json();
+    if (q.total) {
+      const pct = Math.round((q.used / q.total) * 100);
+      document.getElementById('storageUsed').textContent  = fmtBytes(q.used);
+      document.getElementById('storageTotal').textContent = fmtBytes(q.total);
+      document.getElementById('storageFill').style.width  = pct + '%';
+      document.getElementById('storageCard').style.display = '';
     }
-    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-fingerprint"></i> Verify Integrity'; }
+  } catch {}
 }
 
-document.addEventListener('DOMContentLoaded', () => { loadSyncHealth(); });
+async function loadConfigs() {
+  const r = await fetch('/api/sync-configs');
+  configs = await r.json();
+  renderConfigs();
+}
 
-// Listen for live sync events and show in "What's Happening"
-ProgressManager.onSync((event, data) => {
-    const section = document.getElementById('whats-happening');
-    const ops = document.getElementById('live-operations');
-    if (!section || !ops) return;
+function renderConfigs() {
+  const list  = document.getElementById('syncList');
+  const empty = document.getElementById('emptyState');
+  if (!configs.length) { empty.style.display = ''; return; }
+  empty.style.display = 'none';
+  list.innerHTML = '';
+  configs.forEach(c => {
+    const div = document.createElement('div');
+    div.className = 'sync-card card';
+    div.id = `sc-${c.id}`;
+    const dirLabel = {push:'↑ Push', pull:'↓ Pull', bisync:'⇅ Bisync'}[c.direction] || c.direction;
+    const running  = c.running;
+    div.innerHTML = `
+      <div class="sync-card-main">
+        <div class="sync-card-info">
+          <div class="sync-name">${esc(c.name)}</div>
+          <div class="sync-paths">
+            <code>${esc(c.local_path)}</code>
+            <span class="sync-arrow">${{push:'→',pull:'←',bisync:'⇄'}[c.direction]||'→'}</span>
+            <code>Proton:${esc(c.remote_path||'/')}</code>
+          </div>
+        </div>
+        <div class="sync-card-actions">
+          <span class="badge ${running?'badge-running':'badge-idle'}">${running?'Running':'Idle'}</span>
+          <button class="btn btn-primary btn-sm" onclick="runSync('${c.id}')" ${running?'disabled':''}>
+            ${running?'Syncing…':'Sync Now'}
+          </button>
+          <button class="btn btn-ghost btn-sm" onclick="compareSync('${c.id}')" title="Compare">⇄</button>
+          <button class="btn btn-ghost btn-sm" onclick="editSync('${c.id}')" title="Edit">✎</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteSync('${c.id}')" title="Delete">✕</button>
+        </div>
+      </div>
+      <div class="sync-progress-row" id="sp-${c.id}" style="display:none">
+        <div class="progress-track"><div class="progress-fill" id="pf-${c.id}" style="width:0%"></div></div>
+        <div class="progress-meta" id="pm-${c.id}"></div>
+      </div>`;
+    list.appendChild(div);
+    if (running) startPolling(c.id, 0);
+  });
+}
 
-    if (event === 'sync_started') {
-        section.style.display = 'block';
-        ops.innerHTML = `<div style="display:flex;align-items:center;gap:12px;padding:12px 0">
-            <span class="spinner"></span>
-            <div>
-                <div style="font-weight:600">${escHtml(data.name || 'Sync')}</div>
-                <div style="font-size:12px;color:var(--text-muted)">Starting sync operation...</div>
-            </div>
-        </div>`;
-    } else if (event === 'sync_progress' && data.progress) {
-        section.style.display = 'block';
-        const p = data.progress;
-        ops.innerHTML = `<div style="padding:12px 0">
-            <div style="display:flex;justify-content:space-between;margin-bottom:8px">
-                <span style="font-weight:600">${escHtml(data.name || 'Sync')}</span>
-                <span style="font-family:var(--font-mono);color:var(--proton-purple-light)">${p.percent || 0}%</span>
-            </div>
-            <div class="progress-bar-container">
-                <div class="progress-bar-fill" style="width:${p.percent || 0}%"></div>
-            </div>
-            <div style="display:flex;gap:16px;margin-top:6px;font-size:12px;color:var(--text-muted)">
-                ${p.bytes_done ? `<span>${p.bytes_done} / ${p.bytes_total}</span>` : ''}
-                ${p.speed ? `<span>${p.speed}</span>` : ''}
-                ${p.eta ? `<span>ETA: ${p.eta}</span>` : ''}
-            </div>
-        </div>`;
-    } else if (event === 'sync_completed') {
-        const ok = data.success;
-        ops.innerHTML = `<div style="display:flex;align-items:center;gap:12px;padding:12px 0">
-            <i class="fas ${ok ? 'fa-check-circle' : 'fa-times-circle'}" style="font-size:20px;color:var(${ok ? '--success' : '--danger'})"></i>
-            <div>
-                <div style="font-weight:600">${escHtml(data.name || 'Sync')} — ${ok ? 'Completed' : 'Failed'}</div>
-            </div>
-        </div>`;
-        setTimeout(() => { section.style.display = 'none'; }, 10000);
-        loadDashboard();
+// ── Run sync ──────────────────────────────────────────────────────────────────
+async function runSync(id) {
+  const r = await fetch(`/api/sync-configs/${id}/run`, {method:'POST'});
+  const d = await r.json();
+  if (!d.ok) { toast(d.error || 'Failed to start', 'error'); return; }
+  _logOffset = 0;
+  _logConfigId = id;
+  const c = configs.find(x => x.id === id);
+  document.getElementById('logTitle').textContent = `Syncing: ${c?.name || id}`;
+  document.getElementById('logOutput').textContent = '';
+  document.getElementById('logPanel').style.display = '';
+  document.getElementById('logPanel').scrollIntoView({behavior:'smooth'});
+  startPolling(id, 0);
+  await loadConfigs();
+}
+
+function startPolling(id, offset) {
+  if (_activePolls[id]) clearInterval(_activePolls[id]);
+  _logOffset = offset;
+  _activePolls[id] = setInterval(() => pollStatus(id), 800);
+}
+
+async function pollStatus(id) {
+  try {
+    const r = await fetch(`/api/sync-configs/${id}/status?since=${_logOffset}`);
+    const d = await r.json();
+
+    // Append new log lines
+    if (d.lines?.length) {
+      _logOffset += d.lines.length;
+      if (_logConfigId === id) appendLog(d.lines);
     }
-});
+
+    // Update progress bar for this card
+    const p = d.progress || {};
+    const pct = p.percent ?? 0;
+    const pf  = document.getElementById(`pf-${id}`);
+    const pm  = document.getElementById(`pm-${id}`);
+    const sp  = document.getElementById(`sp-${id}`);
+    if (pf && sp) {
+      sp.style.display = '';
+      pf.style.width   = pct + '%';
+      if (pm) {
+        let meta = pct + '%';
+        if (p.speed)     meta += ' · ' + p.speed;
+        if (p.eta)       meta += ' · ETA ' + p.eta;
+        if (p.bytes_done && p.bytes_total) meta += ` · ${p.bytes_done} / ${p.bytes_total}`;
+        pm.textContent = meta;
+      }
+    }
+
+    // Update global log panel progress if watching this sync
+    if (_logConfigId === id) {
+      const pw = document.getElementById('progressWrap');
+      const pFill = document.getElementById('progressFill');
+      const pMeta = document.getElementById('progressMeta');
+      if (pct > 0) {
+        pw.style.display = '';
+        pFill.style.width = pct + '%';
+        let meta = pct + '%';
+        if (p.speed)     meta += ' · ' + p.speed;
+        if (p.eta)       meta += ' · ETA ' + p.eta;
+        if (p.bytes_done && p.bytes_total) meta += ` · ${p.bytes_done} / ${p.bytes_total}`;
+        pMeta.textContent = meta;
+      }
+    }
+
+    if (d.done) {
+      clearInterval(_activePolls[id]);
+      delete _activePolls[id];
+      const success = d.success;
+      toast(success ? '✓ Sync complete' : '✗ Sync failed', success ? 'success' : 'error');
+      await loadConfigs();
+    }
+  } catch {}
+}
+
+function appendLog(lines) {
+  const el  = document.getElementById('logOutput');
+  const chk = document.getElementById('autoScrollChk');
+  el.textContent += lines.join('\n') + '\n';
+  if (chk?.checked) el.scrollTop = el.scrollHeight;
+}
+
+function closeLog() {
+  document.getElementById('logPanel').style.display = 'none';
+  _logConfigId = null;
+}
+
+// ── Compare ───────────────────────────────────────────────────────────────────
+async function compareSync(id) {
+  const c = configs.find(x => x.id === id);
+  toast(`Comparing: ${c?.name || id} (this may take a while for large folders…)`, 'info');
+  try {
+    const r = await fetch(`/api/sync-configs/${id}/compare`, {method:'POST'});
+    const d = await r.json();
+    if (d.error) { toast(d.error, 'error'); return; }
+    const lines = [
+      `=== Compare: ${d.config_name} ===`,
+      `Local:  ${d.local.files} files, ${fmtBytes(d.local.total_size)}`,
+      `Remote: ${d.remote.files} files, ${fmtBytes(d.remote.total_size)}`,
+      '',
+      d.in_sync
+        ? '✓ In sync — no differences found.'
+        : `Missing on remote (${d.missing_on_remote_count}): ${d.missing_on_remote.slice(0,20).join(', ')}${d.missing_on_remote_count>20?'…':''}`,
+    ];
+    if (!d.in_sync && d.missing_on_local_count)
+      lines.push(`Missing locally (${d.missing_on_local_count}): ${d.missing_on_local.slice(0,20).join(', ')}${d.missing_on_local_count>20?'…':''}`);
+    _logConfigId = id;
+    document.getElementById('logTitle').textContent = `Compare: ${c?.name || id}`;
+    document.getElementById('logOutput').textContent = lines.join('\n');
+    document.getElementById('progressWrap').style.display = 'none';
+    document.getElementById('logPanel').style.display = '';
+    document.getElementById('logPanel').scrollIntoView({behavior:'smooth'});
+  } catch (e) { toast('Compare failed: ' + e.message, 'error'); }
+}
+
+// ── Delete ────────────────────────────────────────────────────────────────────
+async function deleteSync(id) {
+  const c = configs.find(x => x.id === id);
+  if (!confirm(`Delete sync pair "${c?.name || id}"?`)) return;
+  await fetch(`/api/sync-configs/${id}`, {method:'DELETE'});
+  toast('Sync pair removed', 'success');
+  await loadConfigs();
+}
+
+// ── Add / Edit modal ──────────────────────────────────────────────────────────
+function openAddModal() {
+  document.getElementById('modalTitle').textContent = 'Add Sync Pair';
+  document.getElementById('editId').value    = '';
+  document.getElementById('fName').value     = '';
+  document.getElementById('fLocal').value    = '';
+  document.getElementById('fRemote').value   = '';
+  document.querySelectorAll('[name=direction]').forEach(r => { r.checked = r.value === 'push'; });
+  document.getElementById('modalBackdrop').style.display = 'flex';
+}
+
+function editSync(id) {
+  const c = configs.find(x => x.id === id);
+  if (!c) return;
+  document.getElementById('modalTitle').textContent = 'Edit Sync Pair';
+  document.getElementById('editId').value    = c.id;
+  document.getElementById('fName').value     = c.name;
+  document.getElementById('fLocal').value    = c.local_path;
+  document.getElementById('fRemote').value   = c.remote_path || '';
+  document.querySelectorAll('[name=direction]').forEach(r => { r.checked = r.value === c.direction; });
+  document.getElementById('modalBackdrop').style.display = 'flex';
+}
+
+async function saveSync() {
+  const id        = document.getElementById('editId').value;
+  const direction = document.querySelector('[name=direction]:checked')?.value || 'push';
+  const payload   = {
+    name:        document.getElementById('fName').value.trim(),
+    local_path:  document.getElementById('fLocal').value.trim(),
+    remote_path: document.getElementById('fRemote').value.trim(),
+    direction,
+  };
+  if (!payload.local_path) { toast('Local path is required', 'error'); return; }
+  try {
+    const r = id
+      ? await fetch(`/api/sync-configs/${id}`, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)})
+      : await fetch('/api/sync-configs', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+    if (!r.ok) { const d = await r.json(); toast(d.error || 'Error', 'error'); return; }
+    closeModal();
+    toast(id ? 'Sync pair updated' : 'Sync pair added', 'success');
+    await loadConfigs();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function closeModal(e) {
+  if (e && e.target !== document.getElementById('modalBackdrop')) return;
+  document.getElementById('modalBackdrop').style.display = 'none';
+}
+
+// ── Folder browser ────────────────────────────────────────────────────────────
+function browseLocal() {
+  _browserMode = 'local';
+  _browserCurrent = document.getElementById('fLocal').value || '';
+  document.getElementById('browserTitle').textContent = 'Browse Local';
+  document.getElementById('browserBackdrop').style.display = 'flex';
+  loadBrowser(_browserCurrent || '~');
+}
+function browseRemote() {
+  _browserMode = 'remote';
+  _browserCurrent = document.getElementById('fRemote').value || '';
+  document.getElementById('browserTitle').textContent = 'Browse Proton Drive';
+  document.getElementById('browserBackdrop').style.display = 'flex';
+  loadBrowser(_browserCurrent || '');
+}
+async function loadBrowser(path) {
+  _browserCurrent = path;
+  document.getElementById('browserPath').textContent = path || '/';
+  const body = document.getElementById('browserBody');
+  body.innerHTML = '<div class="muted">Loading…</div>';
+  try {
+    const url = _browserMode === 'local'
+      ? `/api/browse/local?path=${encodeURIComponent(path)}`
+      : `/api/browse/remote?path=${encodeURIComponent(path)}`;
+    const r = await fetch(url);
+    const d = await r.json();
+    if (d.error) { body.innerHTML = `<div class="error">${esc(d.error)}</div>`; return; }
+    body.innerHTML = '';
+    if (d.parent !== undefined && d.parent !== null) {
+      const up = document.createElement('div');
+      up.className = 'browser-item dir';
+      up.textContent = '↑ ..';
+      up.onclick = () => loadBrowser(d.parent);
+      body.appendChild(up);
+    }
+    (d.items || []).forEach(item => {
+      if (!item.is_dir) return;
+      const el = document.createElement('div');
+      el.className = 'browser-item dir';
+      el.textContent = '📁 ' + item.name;
+      el.onclick = () => loadBrowser(item.path);
+      body.appendChild(el);
+    });
+  } catch (e) { body.innerHTML = `<div class="error">${esc(e.message)}</div>`; }
+}
+function selectBrowserPath() {
+  if (_browserMode === 'local') document.getElementById('fLocal').value = _browserCurrent;
+  else                          document.getElementById('fRemote').value = _browserCurrent;
+  closeBrowser();
+}
+function closeBrowser(e) {
+  if (e && e.target !== document.getElementById('browserBackdrop')) return;
+  document.getElementById('browserBackdrop').style.display = 'none';
+}
+
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+load();
 </script>
 {% endblock %}

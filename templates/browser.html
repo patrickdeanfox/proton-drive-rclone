@@ -1,52 +1,95 @@
 {% extends 'base.html' %}
-{% set active = 'browser' %}
-{% block title %}File Browser — Proton Drive Manager{% endblock %}
+{% set page = 'browser' %}
+{% block title %}File Browser — Proton Drive Sync{% endblock %}
 
 {% block content %}
 <div class="page-header">
-    <h2>File Browser</h2>
-    <p>View and compare files in both your local sync folder and Proton Drive.</p>
+  <h1>File Browser</h1>
 </div>
 
-<div class="browser-layout">
-    <!-- Local Pane -->
-    <div class="browser-pane">
-        <div class="browser-pane-header">
-            <span class="pane-label local">💻 LOCAL</span>
-            <button class="btn btn-sm btn-ghost" onclick="browseLocal('')" style="margin-left:auto">🏠 Home</button>
-            <button class="btn btn-sm btn-ghost" onclick="browseLocal(localBrowserPath)">🔄</button>
-        </div>
-        <div id="local-breadcrumb" class="browser-breadcrumb">/</div>
-        <div id="local-file-list" class="file-list">
-            <div class="loading-overlay"><span class="spinner"></span></div>
-        </div>
+<div class="browser-grid">
+  <!-- Local pane -->
+  <div class="card browser-pane">
+    <div class="pane-header">
+      <strong>Local</strong>
+      <code id="localPath" class="pane-path">~</code>
     </div>
+    <div class="pane-body" id="localPane">Loading…</div>
+  </div>
 
-    <!-- Remote Pane -->
-    <div class="browser-pane">
-        <div class="browser-pane-header">
-            <span class="pane-label remote">☁️ PROTON DRIVE</span>
-            <button class="btn btn-sm btn-ghost" onclick="browseRemote('')" style="margin-left:auto">🏠 Root</button>
-            <button class="btn btn-sm btn-ghost" onclick="browseRemote(remoteBrowserPath)">🔄</button>
-        </div>
-        <div id="remote-breadcrumb" class="browser-breadcrumb">☁️ /</div>
-        <div id="remote-file-list" class="file-list">
-            <div class="loading-overlay"><span class="spinner"></span></div>
-        </div>
+  <!-- Remote pane -->
+  <div class="card browser-pane">
+    <div class="pane-header">
+      <strong>Proton Drive</strong>
+      <code id="remotePath" class="pane-path">/</code>
     </div>
+    <div class="pane-body" id="remotePane">Loading…</div>
+  </div>
 </div>
+{% endblock %}
 
-<!-- Legend -->
-<div class="card" style="margin-top: 20px;">
-    <div style="font-size: 13px; color: var(--text-secondary); display: flex; gap: 24px; flex-wrap: wrap;">
-        <span>📁 Directory (click to navigate)</span>
-        <span>📄 File</span>
-        <span>🖼️ Image</span>
-        <span>🎬 Video</span>
-        <span>🎵 Audio</span>
-        <span>📦 Archive</span>
-        <span>🐍 Python</span>
-        <span>📜 Script</span>
-    </div>
-</div>
+{% block scripts %}
+<script>
+let localCurrent  = '';
+let remoteCurrent = '';
+
+function renderPane(paneId, pathId, items, parent, onNav) {
+  const pane = document.getElementById(paneId);
+  pane.innerHTML = '';
+  if (parent !== undefined && parent !== null) {
+    const up = document.createElement('div');
+    up.className = 'browser-item dir';
+    up.textContent = '↑ ..';
+    up.onclick = () => onNav(parent);
+    pane.appendChild(up);
+  }
+  if (!items.length) {
+    pane.innerHTML += '<div class="muted" style="padding:8px">(empty)</div>';
+  }
+  items.forEach(item => {
+    const el = document.createElement('div');
+    el.className = 'browser-item ' + (item.is_dir ? 'dir' : 'file');
+    el.textContent = (item.is_dir ? '📁 ' : '📄 ') + item.name;
+    if (item.size != null && !item.is_dir) {
+      const sz = document.createElement('span');
+      sz.className = 'item-size';
+      sz.textContent = fmtBytes(item.size);
+      el.appendChild(sz);
+    }
+    if (item.is_dir) el.onclick = () => onNav(item.path);
+    pane.appendChild(el);
+  });
+}
+
+async function loadLocal(path) {
+  localCurrent = path;
+  document.getElementById('localPath').textContent = path || '~';
+  const pane = document.getElementById('localPane');
+  pane.innerHTML = '<div class="muted">Loading…</div>';
+  try {
+    const r = await fetch(`/api/browse/local?path=${encodeURIComponent(path || '')}`);
+    const d = await r.json();
+    if (d.error) { pane.innerHTML = `<div class="error">${d.error}</div>`; return; }
+    document.getElementById('localPath').textContent = d.path;
+    renderPane('localPane', 'localPath', d.items, d.parent, loadLocal);
+  } catch (e) { pane.innerHTML = `<div class="error">${e.message}</div>`; }
+}
+
+async function loadRemote(path) {
+  remoteCurrent = path;
+  document.getElementById('remotePath').textContent = '/' + path;
+  const pane = document.getElementById('remotePane');
+  pane.innerHTML = '<div class="muted">Loading…</div>';
+  try {
+    const r = await fetch(`/api/browse/remote?path=${encodeURIComponent(path || '')}`);
+    const d = await r.json();
+    if (d.error) { pane.innerHTML = `<div class="error">${d.error}</div>`; return; }
+    document.getElementById('remotePath').textContent = '/' + (d.path || '');
+    renderPane('remotePane', 'remotePath', d.items, d.parent, loadRemote);
+  } catch (e) { pane.innerHTML = `<div class="error">${e.message}</div>`; }
+}
+
+loadLocal('');
+loadRemote('');
+</script>
 {% endblock %}

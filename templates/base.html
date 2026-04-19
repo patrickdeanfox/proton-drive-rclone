@@ -1,86 +1,94 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}Proton Drive Manager{% endblock %}</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-    <link rel="stylesheet" href="/static/css/style.css">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}Proton Drive Sync{% endblock %}</title>
+<link rel="stylesheet" href="/static/css/app.css">
 </head>
 <body>
-    <div class="app-layout">
-        <!-- Sidebar -->
-        <aside class="sidebar">
-            <div class="sidebar-brand">
-                <div class="brand-icon">
-                    <i class="fas fa-shield-halved" style="font-size:16px"></i>
-                </div>
-                <div>
-                    <h1>Proton Drive</h1>
-                    <small>Sync Manager</small>
-                </div>
-            </div>
-            <nav class="sidebar-nav">
-                <a href="/" class="{% if active == 'dashboard' %}active{% endif %}">
-                    <span class="nav-icon"><i class="fas fa-chart-pie"></i></span> Dashboard
-                </a>
-
-                <div class="nav-section">Sync</div>
-                <a href="/sync-schedules" class="{% if active == 'sync' %}active{% endif %}">
-                    <span class="nav-icon"><i class="fas fa-arrows-rotate"></i></span> Sync & Schedules
-                </a>
-                <a href="/connection" class="{% if active == 'connection' %}active{% endif %}">
-                    <span class="nav-icon"><i class="fas fa-plug"></i></span> Connection
-                </a>
-                <a href="/logs" class="{% if active == 'logs' %}active{% endif %}">
-                    <span class="nav-icon"><i class="fas fa-scroll"></i></span> Logs
-                </a>
-
-                <div class="nav-section">AI Tools</div>
-                <a href="/ai/" class="{% if active == 'ai' %}active{% endif %}">
-                    <span class="nav-icon"><i class="fas fa-brain"></i></span> AI Organizer
-                </a>
-
-                <div class="nav-section">Configure</div>
-                <a href="/all-settings" class="{% if active == 'settings' %}active{% endif %}">
-                    <span class="nav-icon"><i class="fas fa-gear"></i></span> Settings
-                </a>
-
-                <div class="nav-section">External</div>
-                <a href="https://drive.proton.me/" target="_blank" rel="noopener" class="external-link">
-                    <span class="nav-icon"><i class="fas fa-arrow-up-right-from-square"></i></span> Proton Drive
-                </a>
-            </nav>
-
-            <!-- Global Sync Indicator -->
-            <div id="global-sync-indicator" class="global-sync-indicator" style="display:none"></div>
-
-            <!-- WebSocket Status -->
-            <div class="ws-status">
-                <span class="ws-dot" id="ws-dot"></span>
-                <span id="ws-label">Connecting...</span>
-            </div>
-
-            <div class="sidebar-footer">
-                <div>protondrive-linux v0.2.0</div>
-                <div style="margin-top:3px;">Powered by rclone</div>
-            </div>
-        </aside>
-
-        <!-- Main Content -->
-        <main class="main-content">
-            {% block content %}{% endblock %}
-        </main>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-icon">⬡</div>
+      <div class="brand-text">
+        <strong>Proton Drive</strong>
+        <span>rclone sync</span>
+      </div>
     </div>
 
-    <!-- Toast Container -->
-    <div id="toast-container" class="toast-container"></div>
+    <nav>
+      <a href="/"         class="nav-link {% if page=='home'     %}active{% endif %}">
+        <svg viewBox="0 0 20 20"><path d="M3 9.5L10 3l7 6.5V17a1 1 0 01-1 1H4a1 1 0 01-1-1V9.5z" stroke="currentColor" fill="none" stroke-width="1.5"/><path d="M7 18V12h6v6" stroke="currentColor" fill="none" stroke-width="1.5"/></svg>
+        Dashboard
+      </a>
+      <a href="/browser"  class="nav-link {% if page=='browser'  %}active{% endif %}">
+        <svg viewBox="0 0 20 20"><path d="M3 5a2 2 0 012-2h2l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V5z" stroke="currentColor" fill="none" stroke-width="1.5"/></svg>
+        File Browser
+      </a>
+      <a href="/logs"     class="nav-link {% if page=='logs'     %}active{% endif %}">
+        <svg viewBox="0 0 20 20"><path d="M4 4h12M4 8h12M4 12h8" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/></svg>
+        Logs
+      </a>
+      <a href="/settings" class="nav-link {% if page=='settings' %}active{% endif %}">
+        <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="3" stroke="currentColor" fill="none" stroke-width="1.5"/><path d="M10 2v2M10 16v2M2 10h2M16 10h2M4.22 4.22l1.42 1.42M14.36 14.36l1.42 1.42M4.22 15.78l1.42-1.42M14.36 5.64l1.42-1.42" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        Settings
+      </a>
+    </nav>
 
-    <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
-    <script src="/static/js/progress.js"></script>
-    <script src="/static/js/app.js"></script>
-    {% block scripts %}{% endblock %}
+    <div class="sidebar-status">
+      <div class="status-dot" id="statusDot"></div>
+      <span id="statusLabel">Checking…</span>
+    </div>
+  </aside>
+
+  <main class="main">
+    {% block content %}{% endblock %}
+  </main>
+</div>
+
+<div id="toast-area"></div>
+
+<script>
+async function refreshStatus() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    const dot = document.getElementById('statusDot');
+    const lbl = document.getElementById('statusLabel');
+    if (d.connected) {
+      dot.className = 'status-dot connected';
+      lbl.textContent = d.remote;
+    } else {
+      dot.className = 'status-dot error';
+      lbl.textContent = 'Disconnected';
+    }
+  } catch {
+    document.getElementById('statusDot').className = 'status-dot error';
+    document.getElementById('statusLabel').textContent = 'Offline';
+  }
+}
+
+function toast(msg, type = 'info') {
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.textContent = msg;
+  document.getElementById('toast-area').appendChild(el);
+  setTimeout(() => el.classList.add('show'), 10);
+  setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 300); }, 3500);
+}
+
+function fmtBytes(b) {
+  if (!b && b !== 0) return '—';
+  const units = ['B','KB','MB','GB','TB'];
+  let i = 0;
+  while (b >= 1024 && i < units.length - 1) { b /= 1024; i++; }
+  return b.toFixed(i ? 1 : 0) + ' ' + units[i];
+}
+
+refreshStatus();
+setInterval(refreshStatus, 30000);
+</script>
+{% block scripts %}{% endblock %}
 </body>
 </html>
