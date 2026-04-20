@@ -15,6 +15,7 @@
 
 {% block scripts %}
 <script>
+{% raw %}
 async function loadLogs() {
   const el = document.getElementById('logOutput');
   try {
@@ -25,5 +26,6 @@ async function loadLogs() {
   } catch (e) { el.textContent = 'Error: ' + e.message; }
 }
 loadLogs();
+{% endraw %}
 </script>
 {% endblock %}

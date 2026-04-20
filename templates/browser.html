@@ -30,6 +30,7 @@
 
 {% block scripts %}
 <script>
+{% raw %}
 let localCurrent  = '';
 let remoteCurrent = '';
 
@@ -91,5 +92,6 @@ async function loadRemote(path) {
 
 loadLocal('');
 loadRemote('');
+{% endraw %}
 </script>
 {% endblock %}

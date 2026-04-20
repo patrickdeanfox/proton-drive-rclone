@@ -127,6 +127,7 @@
 
 {% block scripts %}
 <script>
+{% raw %}
 let configs      = [];
 let _activePolls = {};   // config_id → intervalId
 let _logOffset   = 0;
@@ -181,7 +182,7 @@ function renderConfigs() {
           <div class="sync-name">${esc(c.name)}</div>
           <div class="sync-paths">
             <code>${esc(c.local_path)}</code>
-            <span class="sync-arrow">${c.direction==='bisync'?'⇄':c.direction==='pull'?'←':'→'}</span>
+            <span class="sync-arrow">${{push:'→',pull:'←',bisync:'⇄'}[c.direction]||'→'}</span>
             <code>Proton:${esc(c.remote_path||'/')}</code>
           </div>
         </div>
@@ -439,5 +440,6 @@ function esc(s) {
 }
 
 load();
+{% endraw %}
 </script>
 {% endblock %}

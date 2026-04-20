@@ -50,6 +50,7 @@
 <div id="toast-area"></div>
 
 <script>
+{% raw %}
 async function refreshStatus() {
   try {
     const r = await fetch('/api/status');
@@ -88,6 +89,7 @@ function fmtBytes(b) {
 
 refreshStatus();
 setInterval(refreshStatus, 30000);
+{% endraw %}
 </script>
 {% block scripts %}{% endblock %}
 </body>

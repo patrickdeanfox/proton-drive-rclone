@@ -85,6 +85,7 @@
 
 {% block scripts %}
 <script>
+{% raw %}
 async function loadPage() {
   await loadRemotes();
   await loadConnection();
@@ -180,5 +181,6 @@ async function saveSettings(e) {
 
 function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 loadPage();
+{% endraw %}
 </script>
 {% endblock %}
