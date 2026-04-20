@@ -30,7 +30,8 @@ WEBAPP_DATA = DATA_DIR / "webapp"
 SCHEDULES_FILE = WEBAPP_DATA / "schedules.json"
 SYNC_CONFIGS_FILE = WEBAPP_DATA / "sync_configs.json"
 LOG_DIR = DATA_DIR / "logs"
-SYNC_LOGS_DIR = WEBAPP_DATA / "sync_logs"  # Per-operation structured logs
+SYNC_LOG_FILE = LOG_DIR / "sync.log"          # Plain-text log (also written by sync.sh)
+SYNC_LOGS_DIR = WEBAPP_DATA / "sync_logs"     # Per-operation structured logs
 
 # Ensure directories exist
 WEBAPP_DATA.mkdir(parents=True, exist_ok=True)
@@ -290,6 +291,12 @@ def _run_rclone_streaming(config_id, rclone_args):
                     log_entry["progress"] = progress
                 f.write(json.dumps(log_entry) + "\n")
         except Exception:
+            pass
+        # Also append to sync.log (plain text) so the Logs page and Recent Logs card can read it
+        try:
+            with open(SYNC_LOG_FILE, "a") as f:
+                f.write(line + "\n")
+        except OSError:
             pass
 
     def _run(args):
@@ -1264,6 +1271,19 @@ def api_get_logs():
     except Exception:
         content = log_file.read_text().splitlines()[-lines:]
     return jsonify({"lines": content, "path": str(log_file), "exists": True})
+
+
+@app.route("/api/logs/download")
+def api_download_logs():
+    """Download sync.log as a file attachment."""
+    if not SYNC_LOG_FILE.exists():
+        return jsonify({"error": "No log file yet"}), 404
+    return send_file(
+        str(SYNC_LOG_FILE),
+        mimetype="text/plain",
+        as_attachment=True,
+        download_name="sync.log",
+    )
 
 
 @app.route("/api/logs/clear", methods=["POST"])

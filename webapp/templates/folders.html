@@ -59,6 +59,7 @@
         <h3>📋 Recent Sync Log</h3>
         <div style="display:flex;gap:8px">
             <button class="btn btn-ghost btn-sm" onclick="loadRecentLogs()">🔄 Refresh</button>
+            <a href="/api/logs/download" class="btn btn-ghost btn-sm" download>⬇ Download</a>
             <a href="/logs" class="btn btn-ghost btn-sm">View Full Logs →</a>
         </div>
     </div>
@@ -118,6 +119,7 @@
 {% block scripts %}
 <script>
 let pollTimer = null;
+let logRefreshTimer = null;
 let pollSince = 0;
 let syncStartTime = null;
 let activeSyncId = null;
@@ -197,6 +199,10 @@ async function runSyncWithProgress(configId, configName) {
 
 function startPolling(configId, btn) {
     clearInterval(pollTimer);
+    clearInterval(logRefreshTimer);
+    // Live-refresh Recent Sync Log card every 2s while sync runs
+    logRefreshTimer = setInterval(loadRecentLogs, 2000);
+
     pollTimer = setInterval(async () => {
         try {
             const data = await api(`/sync-configs/${configId}/status?since=${pollSince}`);
@@ -282,6 +288,7 @@ function startPolling(configId, btn) {
 
                 if (btn) { btn.disabled = false; btn.textContent = '▶ Sync'; }
                 activeSyncId = null;
+                clearInterval(logRefreshTimer);
                 loadRecentLogs();
             }
         } catch (e) {
@@ -463,27 +470,30 @@ async function loadRecentLogs() {
     el.scrollTop = el.scrollHeight;
 }
 
-/* ── Check for running syncs on page load ── */
+/* ── Re-attach to running sync OR restore last completed sync on page load ── */
 async function checkForRunningSyncs() {
-    const configs = await api('/sync-configs');
-    for (const c of configs) {
-        const status = await api(`/sync-configs/${c.id}/status`);
-        if (status.running) {
-            // Re-attach to the running sync
-            const btn = document.getElementById(`run-btn-${c.id}`);
+    const allActive = await api('/active-syncs');
+    if (!allActive || !Object.keys(allActive).length) return;
+
+    // 1. Re-attach to any currently running sync
+    for (const [cid, info] of Object.entries(allActive)) {
+        if (info.running) {
+            const btn = document.getElementById(`run-btn-${cid}`);
             if (btn) { btn.disabled = true; btn.textContent = '⏳ Running...'; }
 
-            activeSyncId = c.id;
-            pollSince = 0;  // Show all buffered lines
-            syncStartTime = status.started_at ? new Date(status.started_at).getTime() : Date.now();
+            activeSyncId = cid;
+            syncStartTime = info.started_at ? new Date(info.started_at).getTime() : Date.now();
+
+            const status = await api(`/sync-configs/${cid}/status`);
+            pollSince = status.total; // start from current end; buffered lines shown below
 
             const card = document.getElementById('progress-card');
             const logEl = document.getElementById('progress-log');
-            document.getElementById('progress-title').textContent = `⏳ Syncing: ${c.name}`;
+            document.getElementById('progress-title').textContent = `⏳ Syncing: ${escHtml(info.name)}`;
             document.getElementById('progress-spinner').style.display = '';
             document.getElementById('progress-status').textContent = 'Sync in progress (reconnected)...';
+            document.getElementById('progress-status').style.color = 'var(--text-secondary)';
 
-            // Show all buffered output
             if (status.lines) {
                 status.lines.forEach(line => {
                     if (line.match(/^Transferred:|^Checks:|^Elapsed time:|^\s*$/)) return;
@@ -494,23 +504,49 @@ async function checkForRunningSyncs() {
                     logEl.appendChild(div);
                 });
                 logEl.scrollTop = logEl.scrollHeight;
-                pollSince = status.total;
             }
 
-            // Update progress bar
             const p = status.progress || {};
-            if (p.percent !== undefined) {
-                document.getElementById('stats-bar').style.width = p.percent + '%';
-            }
-            if (p.bytes_done && p.bytes_total) {
-                document.getElementById('stats-files').textContent = `${p.bytes_done} / ${p.bytes_total}`;
-            }
+            if (p.percent !== undefined) document.getElementById('stats-bar').style.width = p.percent + '%';
+            if (p.bytes_done && p.bytes_total) document.getElementById('stats-files').textContent = `${p.bytes_done} / ${p.bytes_total}`;
 
             card.style.display = 'block';
-            startPolling(c.id, btn);
-            break;
+            startPolling(cid, btn);
+            return; // only one at a time
         }
     }
+
+    // 2. Show the most recently completed sync output in the progress card
+    let latest = null;
+    for (const [cid, info] of Object.entries(allActive)) {
+        if (!info.running && (!latest || info.started_at > latest.started_at)) {
+            latest = { cid, ...info };
+        }
+    }
+    if (!latest) return;
+
+    const status = await api(`/sync-configs/${latest.cid}/status`);
+    const card = document.getElementById('progress-card');
+    const logEl = document.getElementById('progress-log');
+    document.getElementById('progress-title').textContent =
+        latest.success ? `✓ Last sync: ${escHtml(latest.name)}` : `✗ Last sync failed: ${escHtml(latest.name)}`;
+    document.getElementById('progress-spinner').style.display = 'none';
+    const statusEl = document.getElementById('progress-status');
+    statusEl.textContent = latest.success ? 'Completed successfully.' : 'Sync finished with errors.';
+    statusEl.style.color = latest.success ? 'var(--success)' : 'var(--danger)';
+
+    if (status.lines) {
+        status.lines.forEach(line => {
+            if (line.match(/^Transferred:|^Checks:|^Elapsed time:|^\s*$/)) return;
+            const div = document.createElement('div');
+            div.className = 'log-line' + (line.includes('ERROR') || line.includes('✗') ? ' log-error'
+                          : line.includes('✓') || line.includes('completed') ? ' log-success' : '');
+            div.textContent = line;
+            logEl.appendChild(div);
+        });
+        logEl.scrollTop = logEl.scrollHeight;
+    }
+    card.style.display = 'block';
 }
 
 /* ── Page init ── */
