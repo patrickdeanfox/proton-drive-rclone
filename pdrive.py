@@ -7,7 +7,33 @@ import subprocess
 import threading
 import time
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+
+
+# ── Saved connections ─────────────────────────────────────────────────────────
+
+SAVES_FILE = Path.home() / ".pdrive_saves.json"
+
+
+def load_saves():
+    try:
+        if SAVES_FILE.exists():
+            return json.loads(SAVES_FILE.read_text())
+    except Exception:
+        pass
+    return []
+
+
+def upsert_save(entry):
+    saves = [s for s in load_saves() if s["name"] != entry["name"]]
+    saves.append(entry)
+    SAVES_FILE.write_text(json.dumps(saves, indent=2))
+
+
+def delete_save(name):
+    saves = [s for s in load_saves() if s["name"] != name]
+    SAVES_FILE.write_text(json.dumps(saves, indent=2))
 
 
 # ── rclone helpers ────────────────────────────────────────────────────────────
@@ -43,11 +69,11 @@ def get_remotes():
     return [r.rstrip(":") for r in out.splitlines() if r.strip()]
 
 
-def _run_sync(src, dst, batch, dry_run):
+def _run_sync(src, dst, batch, dry_run, auto_batch):
     """Run in background thread — all output goes to terminal."""
-    arrow = "→"
     print(f"\n{'─'*52}")
-    print(f"  {src}  {arrow}  {dst}")
+    print(f"  {src}  →  {dst}")
+    print(f"  batch={batch}  auto={'yes' if auto_batch else 'one run'}")
     print(f"{'─'*52}")
 
     if dry_run:
@@ -74,6 +100,10 @@ def _run_sync(src, dst, batch, dry_run):
             print("\n✓ All done — nothing left to transfer.")
             return
 
+        if not auto_batch:
+            print("\nOne batch complete. Run again to continue.")
+            return
+
         if rc == 9:
             print("Pausing 3s before next batch…")
             time.sleep(3)
@@ -84,7 +114,7 @@ def _run_sync(src, dst, batch, dry_run):
             return
 
 
-# ── Remote browser window ─────────────────────────────────────────────────────
+# ── Remote browser ────────────────────────────────────────────────────────────
 
 class RemoteBrowser(tk.Toplevel):
     """Modal dialog for navigating and selecting a remote folder."""
@@ -94,13 +124,11 @@ class RemoteBrowser(tk.Toplevel):
         self.title(f"Browse  {remote}:")
         self.remote = remote
         self.path = ""
-        self.result = None          # set when user confirms selection
+        self.result = None
         self.items = []
-
         self.resizable(True, True)
         self.minsize(460, 380)
         self._build()
-
         self.transient(parent)
         self.grab_set()
         self._load()
@@ -121,13 +149,13 @@ class RemoteBrowser(tk.Toplevel):
         self.lb.pack(side="left", fill="both", expand=True)
         sb.config(command=self.lb.yview)
         self.lb.bind("<Double-Button-1>", lambda _: self._open())
-        self.lb.bind("<Return>", lambda _: self._open())
+        self.lb.bind("<Return>",          lambda _: self._open())
 
         bot = tk.Frame(self, pady=8, padx=10)
         bot.pack(fill="x")
-        tk.Button(bot, text="← Back",   width=9,  command=self._back).pack(side="left", padx=3)
-        tk.Button(bot, text="Open →",   width=9,  command=self._open).pack(side="left", padx=3)
-        tk.Button(bot, text="Select this folder", width=18,
+        tk.Button(bot, text="← Back",  width=9,  command=self._back).pack(side="left", padx=3)
+        tk.Button(bot, text="Open →",  width=9,  command=self._open).pack(side="left", padx=3)
+        tk.Button(bot, text="Select this folder", width=20,
                   bg="#1a73e8", fg="white", command=self._select).pack(side="right", padx=3)
 
     def _load(self):
@@ -156,9 +184,7 @@ class RemoteBrowser(tk.Toplevel):
 
     def _selected_item(self):
         sel = self.lb.curselection()
-        if sel and sel[0] < len(self.items):
-            return self.items[sel[0]]
-        return None
+        return self.items[sel[0]] if sel and sel[0] < len(self.items) else None
 
     def _open(self):
         item = self._selected_item()
@@ -176,86 +202,99 @@ class RemoteBrowser(tk.Toplevel):
         self.destroy()
 
 
-# ── Push / Pull dialog ────────────────────────────────────────────────────────
+# ── Sync dialog ───────────────────────────────────────────────────────────────
 
 class SyncDialog(tk.Toplevel):
-    """Collect source, destination, and options for a push or pull."""
+    """Configure and launch a push or pull. Accepts optional prefill dict."""
 
-    def __init__(self, parent, remotes, direction):
+    def __init__(self, parent, remotes, direction, prefill=None):
         super().__init__(parent)
         self.title("Upload  (local → remote)" if direction == "push"
                    else "Download  (remote → local)")
         self.direction = direction
-        self.remotes = remotes
-        self._remote_path = None    # selected remote subfolder path
-
+        self.remotes   = remotes
+        self._remote_path = None
         self.resizable(False, False)
         self._build()
+        if prefill:
+            self._apply_prefill(prefill)
         self.transient(parent)
         self.grab_set()
         self.wait_window()
 
+    # ── layout ────────────────────────────────────────────────────────────────
+
     def _build(self):
         f = tk.Frame(self, padx=16, pady=12)
         f.pack(fill="both", expand=True)
+        f.columnconfigure(1, weight=1)
 
-        def row(r, label, widget_fn, col_span=1):
-            tk.Label(f, text=label, anchor="e", width=18).grid(
-                row=r, column=0, sticky="e", pady=5, padx=(0, 8))
-            widget_fn(r)
-
-        # Remote selector
-        tk.Label(f, text="Remote:", anchor="e", width=18).grid(
+        # Remote dropdown
+        tk.Label(f, text="Remote:", anchor="e", width=20).grid(
             row=0, column=0, sticky="e", pady=5, padx=(0, 8))
         self.remote_var = tk.StringVar(value=self.remotes[0] if self.remotes else "")
         ttk.Combobox(f, textvariable=self.remote_var, values=self.remotes,
-                     state="readonly", width=32).grid(row=0, column=1, columnspan=2,
+                     state="readonly", width=30).grid(row=0, column=1, columnspan=2,
                                                        sticky="w", pady=5)
 
         if self.direction == "push":
-            self._build_row_local(f, 1, "Local source:")
-            self._build_row_remote(f, 2, "Remote destination:")
+            self._local_row(f, 1, "Local source:")
+            self._remote_row(f, 2, "Remote destination:")
         else:
-            self._build_row_remote(f, 1, "Remote source:")
-            self._build_row_local(f, 2, "Local destination:")
+            self._remote_row(f, 1, "Remote source:")
+            self._local_row(f, 2, "Local destination:")
 
         # Batch size
-        tk.Label(f, text="Batch size:", anchor="e", width=18).grid(
+        tk.Label(f, text="Batch size:", anchor="e", width=20).grid(
             row=3, column=0, sticky="e", pady=5, padx=(0, 8))
         self.batch_var = tk.StringVar(value="2G")
         tk.Entry(f, textvariable=self.batch_var, width=10).grid(
             row=3, column=1, sticky="w", pady=5)
-        tk.Label(f, text="e.g. 500M, 2G, 10G", fg="gray").grid(
+        tk.Label(f, text="e.g. 500M · 2G · 10G", fg="gray").grid(
             row=3, column=2, sticky="w")
 
-        # Dry run
-        self.dry_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(f, text="Dry run first (safe preview — no files copied)",
+        # Checkboxes
+        self.dry_var  = tk.BooleanVar(value=True)
+        self.auto_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(f, text="Dry run first  (safe preview — no files copied)",
                        variable=self.dry_var).grid(
-            row=4, column=1, columnspan=2, sticky="w", pady=4)
+            row=4, column=1, columnspan=2, sticky="w", pady=2)
+        tk.Checkbutton(f, text="Auto-batch until fully done",
+                       variable=self.auto_var).grid(
+            row=5, column=1, columnspan=2, sticky="w", pady=2)
 
-        # Start button
-        tk.Button(f, text="Start", width=14, bg="#1a73e8", fg="white",
+        # Save section
+        sf = tk.LabelFrame(f, text="Save this connection", padx=8, pady=6)
+        sf.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(12, 4))
+        tk.Label(sf, text="Name:").pack(side="left")
+        self.name_var = tk.StringVar()
+        tk.Entry(sf, textvariable=self.name_var, width=26).pack(side="left", padx=6)
+        tk.Button(sf, text="Save", command=self._save).pack(side="left")
+
+        # Start
+        tk.Button(f, text="  Start  ", bg="#1a73e8", fg="white",
                   font=("TkDefaultFont", 11, "bold"),
-                  command=self._start).grid(row=5, column=1, pady=(14, 4), sticky="w")
+                  command=self._start).grid(row=7, column=1, pady=(12, 4), sticky="w")
 
-    def _build_row_local(self, f, row, label):
-        tk.Label(f, text=label, anchor="e", width=18).grid(
+    def _local_row(self, f, row, label):
+        tk.Label(f, text=label, anchor="e", width=20).grid(
             row=row, column=0, sticky="e", pady=5, padx=(0, 8))
         self.local_var = tk.StringVar()
-        tk.Entry(f, textvariable=self.local_var, width=33).grid(
+        tk.Entry(f, textvariable=self.local_var, width=31).grid(
             row=row, column=1, sticky="w", pady=5)
         tk.Button(f, text="Browse…", command=self._pick_local).grid(
             row=row, column=2, padx=4, pady=5)
 
-    def _build_row_remote(self, f, row, label):
-        tk.Label(f, text=label, anchor="e", width=18).grid(
+    def _remote_row(self, f, row, label):
+        tk.Label(f, text=label, anchor="e", width=20).grid(
             row=row, column=0, sticky="e", pady=5, padx=(0, 8))
         self.remote_lbl_var = tk.StringVar(value="(click Browse…)")
         tk.Label(f, textvariable=self.remote_lbl_var, fg="#1a73e8",
-                 anchor="w", width=33).grid(row=row, column=1, sticky="w", pady=5)
+                 anchor="w", width=31).grid(row=row, column=1, sticky="w", pady=5)
         tk.Button(f, text="Browse…", command=self._pick_remote).grid(
             row=row, column=2, padx=4, pady=5)
+
+    # ── actions ───────────────────────────────────────────────────────────────
 
     def _pick_local(self):
         path = filedialog.askdirectory(parent=self, title="Select folder")
@@ -270,15 +309,43 @@ class SyncDialog(tk.Toplevel):
         browser = RemoteBrowser(self, remote)
         if browser.result is not None:
             self._remote_path = browser.result
-            display = f"{remote}:/{browser.result}" if browser.result else f"{remote}:  (root)"
-            self.remote_lbl_var.set(display)
+            label = f"{remote}:/{browser.result}" if browser.result else f"{remote}:  (root)"
+            self.remote_lbl_var.set(label)
+
+    def _apply_prefill(self, p):
+        self.remote_var.set(p["remote"])
+        self.local_var.set(p["local"])
+        self._remote_path = p["remote_path"]
+        label = f"{p['remote']}:/{p['remote_path']}" if p["remote_path"] else f"{p['remote']}:  (root)"
+        self.remote_lbl_var.set(label)
+        self.batch_var.set(p.get("batch", "2G"))
+        self.name_var.set(p.get("name", ""))
+        self.auto_var.set(p.get("auto_batch", True))
+
+    def _save(self):
+        name = self.name_var.get().strip()
+        if not name:
+            messagebox.showwarning("Name required", "Enter a name for this connection.", parent=self)
+            return
+        local = self.local_var.get().strip()
+        if not local or self._remote_path is None:
+            messagebox.showwarning("Incomplete", "Fill in all paths before saving.", parent=self)
+            return
+        upsert_save({
+            "name":       name,
+            "direction":  self.direction,
+            "remote":     self.remote_var.get(),
+            "remote_path": self._remote_path,
+            "local":      local,
+            "batch":      self.batch_var.get().strip() or "2G",
+            "auto_batch": self.auto_var.get(),
+        })
+        messagebox.showinfo("Saved", f"'{name}' saved.", parent=self)
 
     def _start(self):
         remote = self.remote_var.get()
         local  = self.local_var.get().strip()
         batch  = self.batch_var.get().strip() or "2G"
-        dry    = self.dry_var.get()
-
         if not remote:
             messagebox.showwarning("Missing", "Select a remote.", parent=self); return
         if not local:
@@ -288,32 +355,27 @@ class SyncDialog(tk.Toplevel):
 
         remote_full = f"{remote}:{self._remote_path}" if self._remote_path else f"{remote}:"
         src, dst = (local, remote_full) if self.direction == "push" else (remote_full, local)
-
+        dry  = self.dry_var.get()
+        auto = self.auto_var.get()
         self.destroy()
-        threading.Thread(target=_run_sync, args=(src, dst, batch, dry), daemon=True).start()
+        threading.Thread(target=_run_sync, args=(src, dst, batch, dry, auto), daemon=True).start()
 
 
 # ── Status window ─────────────────────────────────────────────────────────────
 
 class StatusWindow(tk.Toplevel):
-    """Show quota and connection info for all remotes."""
-
     def __init__(self, parent, remotes):
         super().__init__(parent)
         self.title("Connection Status")
         self.resizable(True, True)
         self.minsize(440, 200)
-
-        txt = tk.Text(self, font=("TkFixedFont", 10), padx=10, pady=8,
-                      state="normal", wrap="none")
-        sb = tk.Scrollbar(self, command=txt.yview)
+        txt = tk.Text(self, font=("TkFixedFont", 10), padx=10, pady=8, wrap="none")
+        sb  = tk.Scrollbar(self, command=txt.yview)
         txt.config(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
         txt.pack(fill="both", expand=True)
-
         txt.insert("end", "Checking remotes…\n")
         txt.config(state="disabled")
-
         self.transient(parent)
         threading.Thread(target=self._fetch, args=(txt, remotes), daemon=True).start()
 
@@ -323,8 +385,7 @@ class StatusWindow(tk.Toplevel):
             lines.append(f"\n{r}:")
             rc, out = rclone("about", f"{r}:")
             if rc == 0:
-                for line in out.splitlines():
-                    lines.append(f"  {line}")
+                lines += [f"  {l}" for l in out.splitlines()]
             else:
                 rc2, _ = rclone("lsd", f"{r}:", "--max-depth", "0")
                 lines.append(f"  {'Connected ✓' if rc2 == 0 else 'Not reachable ✗'}")
@@ -349,55 +410,88 @@ class App(tk.Tk):
         self.after(100, self._load_remotes)
 
     def _build(self):
-        hdr = tk.Frame(self, bg="#1a1a2e", pady=18)
+        # Header
+        hdr = tk.Frame(self, bg="#1a1a2e", pady=16)
         hdr.pack(fill="x")
-        tk.Label(hdr, text="rclone Sync", font=("TkDefaultFont", 18, "bold"),
+        tk.Label(hdr, text="rclone Sync", font=("TkDefaultFont", 16, "bold"),
                  bg="#1a1a2e", fg="white").pack()
         tk.Label(hdr, text="logs stream to terminal", font=("TkDefaultFont", 9),
-                 bg="#1a1a2e", fg="#888").pack()
+                 bg="#1a1a2e", fg="#666").pack()
 
-        body = tk.Frame(self, padx=30, pady=24)
-        body.pack()
-
-        btn_style = dict(width=26, height=2, font=("TkDefaultFont", 11), cursor="hand2")
-
+        # Main action buttons
+        body = tk.Frame(self, padx=24, pady=16)
+        body.pack(fill="x")
+        btn = dict(width=28, height=2, font=("TkDefaultFont", 11), cursor="hand2")
         tk.Button(body, text="⬆  Upload  (local → remote)",
                   bg="#1a73e8", fg="white",
-                  command=lambda: self._open_sync("push"),
-                  **btn_style).pack(pady=6)
-
+                  command=lambda: self._open_sync("push"), **btn).pack(pady=4)
         tk.Button(body, text="⬇  Download  (remote → local)",
                   bg="#0f9d58", fg="white",
-                  command=lambda: self._open_sync("pull"),
-                  **btn_style).pack(pady=6)
-
+                  command=lambda: self._open_sync("pull"), **btn).pack(pady=4)
         tk.Button(body, text="◎  Connection Status",
                   bg="#444", fg="white",
-                  command=self._open_status,
-                  **btn_style).pack(pady=6)
+                  command=self._open_status, **btn).pack(pady=4)
 
+        # Saved connections panel
+        sep = tk.Frame(self, height=1, bg="#ddd")
+        sep.pack(fill="x", padx=16)
+        tk.Label(self, text="SAVED CONNECTIONS",
+                 font=("TkDefaultFont", 8, "bold"), fg="#888").pack(pady=(10, 2))
+        self.saves_frame = tk.Frame(self, padx=16)
+        self.saves_frame.pack(fill="x", pady=(0, 8))
+        self._refresh_saves()
+
+        # Footer status
         self.status_lbl = tk.Label(self, text="Loading remotes…",
-                                   fg="gray", font=("TkDefaultFont", 9), pady=6)
+                                   fg="gray", font=("TkDefaultFont", 9), pady=8)
         self.status_lbl.pack()
 
+    # ── saved connections ─────────────────────────────────────────────────────
+
+    def _refresh_saves(self):
+        for w in self.saves_frame.winfo_children():
+            w.destroy()
+        saves = load_saves()
+        if not saves:
+            tk.Label(self.saves_frame, text="None yet — fill in a sync dialog and hit Save",
+                     fg="#aaa", font=("TkDefaultFont", 9)).pack(pady=4)
+            return
+        for s in saves:
+            icon = "⬆" if s["direction"] == "push" else "⬇"
+            row = tk.Frame(self.saves_frame)
+            row.pack(fill="x", pady=2)
+            tk.Button(row, text=f"{icon}  {s['name']}", anchor="w",
+                      relief="groove", cursor="hand2",
+                      command=lambda s=s: self._open_sync(s["direction"], prefill=s)
+                      ).pack(side="left", fill="x", expand=True, ipady=3)
+            tk.Button(row, text="×", fg="#c0392b", width=3, cursor="hand2",
+                      command=lambda n=s["name"]: self._del_save(n)
+                      ).pack(side="right", padx=(4, 0))
+
+    def _del_save(self, name):
+        if messagebox.askyesno("Delete", f"Delete '{name}'?", parent=self):
+            delete_save(name)
+            self._refresh_saves()
+
+    # ── navigation ────────────────────────────────────────────────────────────
+
     def _load_remotes(self):
-        def fetch():
-            remotes = get_remotes()
-            self.after(0, lambda: self._set_remotes(remotes))
-        threading.Thread(target=fetch, daemon=True).start()
+        threading.Thread(target=lambda: self.after(
+            0, self._set_remotes, get_remotes()), daemon=True).start()
 
     def _set_remotes(self, remotes):
         self.remotes = remotes
         if remotes:
             self.status_lbl.config(text=f"Remotes: {', '.join(remotes)}", fg="#0f9d58")
         else:
-            self.status_lbl.config(text="No remotes found — run: rclone config", fg="#c0392b")
+            self.status_lbl.config(text="No remotes — run: rclone config", fg="#c0392b")
 
-    def _open_sync(self, direction):
+    def _open_sync(self, direction, prefill=None):
         if not self.remotes:
             messagebox.showinfo("No remotes", "No rclone remotes configured.\nRun: rclone config")
             return
-        SyncDialog(self, self.remotes, direction)
+        SyncDialog(self, self.remotes, direction, prefill=prefill)
+        self._refresh_saves()          # pick up any saves made inside the dialog
 
     def _open_status(self):
         if not self.remotes:
