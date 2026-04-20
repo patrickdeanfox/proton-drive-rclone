@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -277,12 +278,22 @@ def _run_sync_thread(config_id):
         reached_100_at = None
         BENIGN_422 = ("already exists", "Code=2500")
         try:
+            # Use stdbuf to force line-buffered output from rclone.
+            # Without this, rclone buffers stdout when writing to a pipe
+            # (not a terminal), so lines only appear after ~4-8 KB accumulates.
+            _stdbuf = shutil.which("stdbuf")
+            _cmd = ([_stdbuf, "-oL", "-eL"] if _stdbuf else []) + ["rclone"] + run_args
             proc = subprocess.Popen(
-                ["rclone"] + run_args,
+                _cmd,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1, env=_safe_env(),
             )
-            for line in proc.stdout:
+            while True:
+                line = proc.stdout.readline()
+                if line == '' and proc.poll() is not None:
+                    break
+                if not line:
+                    continue
                 line = line.rstrip()
                 _append(line)
                 if "RESTY 422" in line and any(p in line for p in BENIGN_422):

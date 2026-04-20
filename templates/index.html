@@ -21,14 +21,15 @@
   </div>
 </div>
 
-<!-- Sync pair list -->
-<div id="syncList">
-  <div class="empty-state" id="emptyState">
-    <div class="empty-icon">⬡</div>
-    <p>No sync pairs yet.<br>Add one to get started.</p>
-    <button class="btn btn-primary" onclick="openAddModal()">Add Sync Pair</button>
-  </div>
+<!-- Empty state (outside syncList so innerHTML='' doesn't destroy it) -->
+<div class="empty-state" id="emptyState" style="display:none">
+  <div class="empty-icon">⬡</div>
+  <p>No sync pairs yet.<br>Add one to get started.</p>
+  <button class="btn btn-primary" onclick="openAddModal()">Add Sync Pair</button>
 </div>
+
+<!-- Sync pair list -->
+<div id="syncList"></div>
 
 <!-- Active log panel (appears when a sync runs) -->
 <div class="card log-card" id="logPanel" style="display:none">
@@ -167,9 +168,10 @@ async function loadConfigs() {
 function renderConfigs() {
   const list  = document.getElementById('syncList');
   const empty = document.getElementById('emptyState');
+  // Always clear first — prevents stale cards when navigating
+  list.innerHTML = '';
   if (!configs.length) { empty.style.display = ''; return; }
   empty.style.display = 'none';
-  list.innerHTML = '';
   configs.forEach(c => {
     const div = document.createElement('div');
     div.className = 'sync-card card';
@@ -214,7 +216,8 @@ async function runSync(id) {
   _logConfigId = id;
   const c = configs.find(x => x.id === id);
   document.getElementById('logTitle').textContent = `Syncing: ${c?.name || id}`;
-  document.getElementById('logOutput').textContent = '';
+  document.getElementById('logOutput').textContent = 'Starting rclone…\n';
+  document.getElementById('progressWrap').style.display = 'none';
   document.getElementById('logPanel').style.display = '';
   document.getElementById('logPanel').scrollIntoView({behavior:'smooth'});
   startPolling(id, 0);
