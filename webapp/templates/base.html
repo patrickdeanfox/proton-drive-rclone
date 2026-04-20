@@ -3,63 +3,48 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}Proton Drive Manager{% endblock %}</title>
+    <title>{% block title %}rclone Manager{% endblock %}</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
     <div class="app-layout">
-        <!-- Sidebar -->
         <aside class="sidebar">
             <div class="sidebar-brand">
                 <div class="brand-icon">⚡</div>
                 <div>
-                    <h1>Proton Drive</h1>
-                    <small>rclone manager</small>
+                    <h1>rclone Manager</h1>
+                    <small>sync any remote</small>
                 </div>
             </div>
             <nav class="sidebar-nav">
                 <a href="/" class="{% if active == 'dashboard' %}active{% endif %}">
                     <span class="nav-icon">📊</span> Dashboard
                 </a>
-                <a href="/folders" class="{% if active == 'folders' %}active{% endif %}">
-                    <span class="nav-icon">📂</span> Sync Folders
-                </a>
-                <a href="/schedules" class="{% if active == 'schedules' %}active{% endif %}">
-                    <span class="nav-icon">🕐</span> Schedules
-                </a>
-                <a href="/browser" class="{% if active == 'browser' %}active{% endif %}">
-                    <span class="nav-icon">🔍</span> File Browser
-                </a>
-                <a href="/connection" class="{% if active == 'connection' %}active{% endif %}">
-                    <span class="nav-icon">🔌</span> Connection
+                <a href="/sync" class="{% if active == 'sync' %}active{% endif %}">
+                    <span class="nav-icon">🔄</span> Sync
                 </a>
                 <a href="/logs" class="{% if active == 'logs' %}active{% endif %}">
                     <span class="nav-icon">📋</span> Logs
                 </a>
-                <a href="/settings" class="{% if active == 'settings' %}active{% endif %}">
-                    <span class="nav-icon">⚙️</span> Settings
+                <a href="/connection" class="{% if active == 'connection' %}active{% endif %}">
+                    <span class="nav-icon">🔌</span> Connection
                 </a>
             </nav>
 
-            <!-- Global Sync Indicator (shown when any sync is running) -->
-            <div id="global-sync-indicator" class="global-sync-indicator" style="display:none">
-            </div>
+            <div id="global-sync-indicator" class="global-sync-indicator" style="display:none"></div>
 
             <div class="sidebar-footer">
-                <div>protondrive-linux v0.1.0</div>
-                <div style="margin-top: 4px;">Powered by rclone</div>
+                <div style="color:var(--text-muted);font-size:11px">Powered by rclone</div>
             </div>
         </aside>
 
-        <!-- Main Content -->
         <main class="main-content">
             {% block content %}{% endblock %}
         </main>
     </div>
 
-    <!-- Toast Container -->
     <div id="toast-container" class="toast-container"></div>
 
     <script src="/static/js/app.js"></script>

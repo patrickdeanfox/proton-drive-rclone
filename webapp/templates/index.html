@@ -1,38 +1,99 @@
 {% extends 'base.html' %}
 {% set active = 'dashboard' %}
-{% block title %}Dashboard — Proton Drive Manager{% endblock %}
+{% block title %}Dashboard — rclone Manager{% endblock %}
 
 {% block content %}
 <div class="page-header">
     <h2>Dashboard</h2>
-    <p>Overview of your Proton Drive sync status and quick actions.</p>
+    <p>Quick status and sync overview.</p>
 </div>
 
-<!-- Status Cards -->
-<div id="dashboard-stats" class="stats-grid">
-    <div class="loading-overlay"><span class="spinner"></span> Loading status...</div>
+<div id="status-cards" class="stats-grid">
+    <div class="loading-overlay"><span class="spinner"></span> Loading...</div>
 </div>
 
-<!-- Quick Actions -->
 <div class="card">
     <div class="card-header">
-        <h3>⚡ Quick Actions</h3>
+        <h3>🔄 Sync Configs</h3>
+        <a href="/sync" class="btn btn-primary btn-sm">Manage →</a>
     </div>
-    <div class="btn-group">
-        <button class="btn btn-primary" onclick="doMount()">🔗 Mount Drive</button>
-        <button class="btn btn-ghost" onclick="doUnmount()">⏏️ Unmount</button>
-        <button class="btn btn-ghost" onclick="doHealthCheck()">🩺 Health Check</button>
-        <button class="btn btn-ghost" onclick="loadDashboard()">🔄 Refresh</button>
+    <div id="dashboard-configs">
+        <div class="loading-overlay"><span class="spinner"></span></div>
     </div>
 </div>
 
-<!-- Sync History -->
 <div class="card">
     <div class="card-header">
-        <h3>📜 Recent Sync History</h3>
+        <h3>📜 Recent History</h3>
+        <a href="/logs" class="btn btn-ghost btn-sm">Full Logs →</a>
     </div>
     <div id="dashboard-history">
         <div class="loading-overlay"><span class="spinner"></span></div>
     </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const DIR_LABELS = {pull: '← Pull', push: '→ Push', bisync: '⇄ Bisync'};
+
+async function loadDashboard() {
+    const status = await api('/status');
+    document.getElementById('status-cards').innerHTML = `
+        <div class="stat-card">
+            <div class="stat-label">rclone</div>
+            <div class="stat-value" style="font-size:14px">${status.rclone_installed
+                ? '<span style="color:var(--success)">✓ Installed</span>'
+                : '<span style="color:var(--danger)">✗ Not found</span>'}</div>
+            <div class="stat-sub">${escHtml(status.rclone_version || '')}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Active Syncs</div>
+            <div class="stat-value">${status.running_syncs}</div>
+            <div class="stat-sub">running now</div>
+        </div>`;
+
+    const configs = await api('/sync-configs');
+    const cfgEl = document.getElementById('dashboard-configs');
+    if (!configs.length) {
+        cfgEl.innerHTML = '<p class="text-muted" style="padding:8px 0">No sync configs yet. <a href="/sync">Add one →</a></p>';
+    } else {
+        cfgEl.innerHTML = `
+            <table class="data-table">
+                <thead><tr><th>Name</th><th>Direction</th><th>Remote</th><th>Local Path</th><th></th></tr></thead>
+                <tbody>
+                    ${configs.map(c => `<tr>
+                        <td><strong>${escHtml(c.name)}</strong></td>
+                        <td><span class="badge badge-accent">${DIR_LABELS[c.direction] || c.direction}</span></td>
+                        <td class="mono" style="font-size:12px">${escHtml(c.remote) || '—'}</td>
+                        <td class="mono" style="font-size:12px">${escHtml(c.local_path) || '—'}</td>
+                        <td><a href="/sync" class="btn btn-ghost btn-xs">▶ Run</a></td>
+                    </tr>`).join('')}
+                </tbody>
+            </table>`;
+    }
+
+    const hist = await api('/sync-history');
+    const histEl = document.getElementById('dashboard-history');
+    if (!hist.length) {
+        histEl.innerHTML = '<p class="text-muted">No syncs run yet.</p>';
+    } else {
+        histEl.innerHTML = `
+            <table class="data-table">
+                <thead><tr><th>Time</th><th>Job</th><th>Status</th></tr></thead>
+                <tbody>
+                    ${hist.slice(0, 10).map(h => `<tr>
+                        <td class="mono" style="font-size:12px;white-space:nowrap">${formatDate(h.timestamp)}</td>
+                        <td>${escHtml(h.job_name)}</td>
+                        <td>${h.success
+                            ? '<span class="badge badge-success">OK</span>'
+                            : '<span class="badge badge-danger">Failed</span>'}</td>
+                    </tr>`).join('')}
+                </tbody>
+            </table>`;
+    }
+}
+
+document.addEventListener('DOMContentLoaded', loadDashboard);
+</script>
 {% endblock %}
