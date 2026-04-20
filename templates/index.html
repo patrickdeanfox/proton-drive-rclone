@@ -181,7 +181,7 @@ function renderConfigs() {
           <div class="sync-name">${esc(c.name)}</div>
           <div class="sync-paths">
             <code>${esc(c.local_path)}</code>
-            <span class="sync-arrow">${{push:'→',pull:'←',bisync:'⇄'}[c.direction]||'→'}</span>
+            <span class="sync-arrow">${c.direction==='bisync'?'⇄':c.direction==='pull'?'←':'→'}</span>
             <code>Proton:${esc(c.remote_path||'/')}</code>
           </div>
         </div>
