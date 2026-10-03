@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Proton Migration</title>
+<style>
+  :root { --bg: #14161a; --panel: #1e2127; --text: #e6e6e6; --muted: #9aa0a6; --ok: #4caf50; --warn: #ffb300; --err: #ef5350; --accent: #3d8bfd; }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, sans-serif; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 12px; }
+  .panel { background: var(--panel); border-radius: 8px; padding: 12px; }
+  .big { font-size: 26px; font-weight: 600; }
+  .muted { color: var(--muted); }
+  .bar { height: 10px; background: #2c3038; border-radius: 5px; overflow: hidden; margin-top: 6px; }
+  .bar > div { height: 100%; background: var(--accent); width: 0; }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 8px 14px; margin: 4px 6px 4px 0; cursor: pointer; font-size: 14px; }
+  button.secondary { background: #3a3f48; }
+  input[type=text] { background: #2c3038; color: var(--text); border: 1px solid #444; border-radius: 4px; padding: 6px; width: 90px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid #2c3038; vertical-align: top; }
+  .st-done { color: var(--ok); } .st-failed { color: var(--err); } .st-running { color: var(--accent); } .st-pending { color: var(--muted); }
+  .lvl-ERROR { color: var(--err); } .lvl-WARN { color: var(--warn); }
+  pre { margin: 0; white-space: pre-wrap; font-size: 12px; max-height: 320px; overflow: auto; }
+  .err { color: var(--err); font-size: 12px; }
+  label { margin-right: 10px; }
+</style>
+</head>
+<body>
+<h1>Proton Drive → NAS migration <span id="phase" class="muted"></span></h1>
+
+<div class="grid">
+  <div class="panel"><div class="muted">Downloaded</div><div class="big" id="bytes"></div><div class="bar"><div id="bytesbar"></div></div><div class="muted" id="speed"></div></div>
+  <div class="panel"><div class="muted">Files</div><div class="big" id="files"></div><div class="muted" id="files2"></div></div>
+  <div class="panel"><div class="muted">Jobs</div><div class="big" id="jobs"></div><div class="muted" id="jobs2"></div></div>
+  <div class="panel"><div class="muted">Window</div><div class="big" id="window"></div><div class="muted" id="window2"></div></div>
+</div>
+
+<div class="panel" style="margin-bottom:12px">
+  <button id="btn-start">Start</button>
+  <button id="btn-pause" class="secondary">Pause</button>
+  <button id="btn-retry" class="secondary">Retry failed</button>
+  <button id="btn-verify" class="secondary">Verify and place now</button>
+  <div style="margin-top:10px">
+    <label><input type="checkbox" id="weekend_only"> Weekend only</label>
+    <label>From <input type="text" id="window_start"></label>
+    <label>To <input type="text" id="window_end"></label>
+    <label>Quiet <input type="text" id="quiet_start"> – <input type="text" id="quiet_end"></label>
+    <button id="btn-window" class="secondary">Save window</button>
+    <span class="muted">Days: mon…sun, 24h clock, NAS time zone</span>
+  </div>
+  <div class="muted" id="current" style="margin-top:8px"></div>
+  <div style="margin-top:10px">
+    <button id="btn-login" class="secondary">Sign in to Proton</button>
+    <span id="login" class="muted"></span>
+  </div>
+</div>
+
+<div class="panel" style="margin-bottom:12px">
+  <table><thead><tr><th>Job</th><th>Files</th><th>GiB</th><th>Status</th><th>Tries</th></tr></thead><tbody id="jobtable"></tbody></table>
+</div>
+
+<div class="panel"><div class="muted" style="margin-bottom:6px">Log</div><pre id="log"></pre></div>
+
+<script>
+// ── Config ──────────────────────────────────────────────────────────────────
+const DEBUG = false;
+const POLL_MS = 5000;
+const GIB = 1073741824;
+const MIB = 1048576;
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+const dbg = (...a) => { if (DEBUG) console.log(...a); };
+const $ = (id) => document.getElementById(id);
+const gib = (b) => (b / GIB).toFixed(2) + ' GiB';
+const pct = (a, b) => b ? Math.min(100, Math.round(100 * a / b)) : 0;
+const eta = (s) => s == null ? '' : s > 7200 ? `${(s / 3600).toFixed(1)} h left` : `${Math.round(s / 60)} min left`;
+
+function render(s) {
+  const t = s.totals, c = s.current, cfg = s.config;
+  $('phase').textContent = `· phase: ${cfg.phase} · ${cfg.enabled === '1' ? 'enabled' : 'paused'}`;
+  $('bytes').textContent = `${gib(s.bytes_done)} / ${gib(s.bytes_total)}`;
+  $('bytesbar').style.width = pct(s.bytes_done, s.bytes_total) + '%';
+  $('speed').textContent = c.running ? `${(c.speed / MIB).toFixed(1)} MiB/s · ${eta(s.eta_s)}` : 'idle';
+  $('files').textContent = `${t.verified || 0} / ${t.to_migrate || 0}`;
+  $('files2').textContent = `verified · ${t.placed || 0} placed · ${t.already_on_nas || 0} already on NAS`;
+  const jc = s.job_counts;
+  $('jobs').textContent = `${jc.done || 0} / ${s.jobs.length}`;
+  $('jobs2').textContent = `done · ${jc.pending || 0} pending · ${jc.failed || 0} failed`;
+  $('window').textContent = s.window_open ? 'open' : 'closed';
+  $('window2').textContent = cfg.weekend_only === '1' ? `${cfg.window_start} → ${cfg.window_end}, quiet ${cfg.quiet_start}–${cfg.quiet_end}` : `any time, quiet ${cfg.quiet_start}–${cfg.quiet_end}`;
+  $('current').textContent = c.running ? `Running: ${c.job.remote_path} (${gib(c.staged_bytes)} staged)` : `Nothing running · NAS time ${s.now}`;
+  const lg = c.login;
+  $('login').innerHTML = lg.url && lg.status === 'waiting'
+    ? `Open this link and sign in (valid about 20 min): <a href="${esc(lg.url)}" target="_blank" rel="noopener">${esc(lg.url)}</a>`
+    : esc(lg.status === 'idle' ? 'Needed once, and again if a job fails with "You need to login first".' : `${lg.status}: ${lg.message}`);
+  if (document.activeElement.tagName !== 'INPUT') {
+    $('weekend_only').checked = cfg.weekend_only === '1';
+    for (const k of ['window_start', 'window_end', 'quiet_start', 'quiet_end']) $(k).value = cfg[k];
+  }
+  $('jobtable').innerHTML = s.jobs.map(j => `<tr><td>${esc(j.remote_path)}</td><td>${j.expected_files}</td><td>${(j.expected_bytes / GIB).toFixed(2)}</td><td class="st-${j.status}">${j.status}${j.error ? `<div class="err">${esc(j.error)}</div>` : ''}</td><td>${j.attempts}</td></tr>`).join('');
+  $('log').textContent = s.log.map(l => `${l.ts} ${l.level} ${l.message}`).join('\n');
+}
+
+function esc(x) { return String(x ?? '').replace(/[&<>]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[ch])); }
+
+// ── IO ──────────────────────────────────────────────────────────────────────
+async function refresh() {
+  try {
+    const r = await fetch('/api/state');
+    render(await r.json());
+  } catch (e) {
+    dbg('refresh failed', e);
+    $('current').textContent = 'UI cannot reach the runner';
+  }
+}
+
+async function control(body) {
+  try {
+    const r = await fetch('/api/control', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const j = await r.json();
+    if (!j.ok) alert('Rejected: check the window values');
+  } catch (e) {
+    dbg('control failed', e);
+  }
+  refresh();
+}
+
+// ── Init ────────────────────────────────────────────────────────────────────
+function init() {
+  $('btn-start').onclick = () => control({ action: 'start' });
+  $('btn-pause').onclick = () => control({ action: 'pause' });
+  $('btn-retry').onclick = () => control({ action: 'retry_failed' });
+  $('btn-verify').onclick = () => control({ action: 'verify_now' });
+  $('btn-login').onclick = () => control({ action: 'login' });
+  $('btn-window').onclick = () => control({
+    action: 'set_window',
+    weekend_only: $('weekend_only').checked ? '1' : '0',
+    window_start: $('window_start').value, window_end: $('window_end').value,
+    quiet_start: $('quiet_start').value, quiet_end: $('quiet_end').value,
+  });
+  refresh();
+  setInterval(refresh, POLL_MS);
+}
+init();
+</script>
+</body>
+</html>

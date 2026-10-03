@@ -1,0 +1,15 @@
+services:
+  proton-migrate:
+    build: .
+    image: proton-migrate:local
+    container_name: proton-migrate
+    user: "1000:10"
+    environment:
+      TZ: America/New_York
+    volumes:
+      - /volume3/docker/proton-migrate/state:/state
+      - /volume1/Media:/data
+      - "/volume1/@home/PDFOX:/home-pdfox"
+    ports:
+      - "192.168.4.42:8104:8104"
+    restart: unless-stopped
