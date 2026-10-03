@@ -256,7 +256,7 @@ def run_job(db, job):
             sample_progress(job_target(job))
             time.sleep(CHILD_POLL_S)
     with runtime_lock:
-        runtime.update(job=None, child=None)
+        runtime.update(job=None, child=None, staged_bytes=0, speed=0.0)
 
     output = job_log.read_text(errors="replace")
     if stop_current.is_set():
