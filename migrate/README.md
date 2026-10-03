@@ -20,7 +20,7 @@ anything in Proton Drive.
 | Content | Destination |
 |---|---|
 | Images and videos (any folder except `data`) and the Photos timeline | `/volume1/Media/photos/proton-import/<proton path>` — then import into Immich |
-| `data/data/...` | `/volume1/Media/adult-archive/<same relative path>` |
+| `data/data/...` and `dropbox/Jupiter/...` | `/volume1/Media/adult-archive/<same relative path>` (Jupiter under `adult-archive/Jupiter/`) |
 | Everything else | `/volume1/@home/PDFOX/Proton Drive/<proton path>` |
 
 Staging while downloading: `/volume1/Media/.proton-staging/`. After placement it holds only

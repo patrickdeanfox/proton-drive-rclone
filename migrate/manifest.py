@@ -22,6 +22,7 @@ OUTPUT_DB = BASE_DIR / "migration.sqlite"
 MY_FILES_PREFIX = "/my-files/"
 PHOTOS_SECTION = "photos"
 ADULT_PREFIX = "/my-files/data/data/"
+ADULT_EXTRA_FOLDERS = {"/my-files/dropbox/Jupiter/": "Jupiter/"}  # decided 2026-10-02: Jupiter to adult
 ALL_DUPLICATE_FOLDERS = ("/my-files/dropbox/219 Rocky Run Road",)
 
 DEST_IMMICH = "immich"
@@ -96,6 +97,9 @@ def destination(section, path, name):
         return DEST_IMMICH, f"photos/{name}"
     if path.startswith(ADULT_PREFIX):
         return DEST_ADULT, path[len(ADULT_PREFIX):]
+    for prefix, dest_prefix in ADULT_EXTRA_FOLDERS.items():
+        if path.startswith(prefix):
+            return DEST_ADULT, dest_prefix + path[len(prefix):]
     rel = path[len(MY_FILES_PREFIX):]
     if extension(name) in MEDIA_EXTENSIONS:
         return DEST_IMMICH, rel
